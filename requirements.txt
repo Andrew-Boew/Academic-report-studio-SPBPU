@@ -1,0 +1,5 @@
+python-docx>=1.1,<2
+lxml>=5,<7
+pypdf>=5,<7
+Pillow>=10,<13
+openpyxl>=3.1,<4

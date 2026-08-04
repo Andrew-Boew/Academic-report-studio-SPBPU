@@ -1,0 +1,46 @@
+# Operating-system and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Credentials and private configuration
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+**/.report-profile.json
+**/.report-subjects.json
+
+# Assignments, datasets, reports, and generated evidence
+*.docx
+*.doc
+*.pdf
+*.xlsx
+*.xls
+*.pptx
+*.ppt
+datasets/
+data/
+work/
+tmp/
+reports/
+rendered*/
+validation*.json
+toc-entries*.json
+
+# Logs and temporary office files
+*.log
+~$*
+*.tmp
