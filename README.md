@@ -42,7 +42,7 @@
 ### 1. Получить репозиторий
 
 ```bash
-git clone https://github.com/<владелец>/academic-report-studio.git
+git clone https://github.com/Andrew-Boew/Academic-report-studio-SPBPU
 cd academic-report-studio
 ```
 
