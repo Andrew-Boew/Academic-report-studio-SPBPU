@@ -33,6 +33,18 @@ MAX_CONTENT_WIDTH_CM = 16.5
 PLACEHOLDER_PATTERN = re.compile(r"\{\{|\}\}|\b(?:TODO|TBD|FIXME)\b|\[вставить[^\]]*\]", re.I)
 MANUAL_HEADING_NUMBER = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+")
 CITATION_PATTERN = re.compile(r"\[(\d+)\]")
+FIGURE_REFERENCE_PATTERN = re.compile(
+    r"(?P<label>\bрис(?:унок|унка|унке|унках|унков|унку|\.?)\s+)"
+    r"(?P<number>(?:[А-ЯЁ]\.)?\d+)",
+    re.IGNORECASE,
+)
+CYRILLIC_BOOKMARK_LETTERS = {
+    "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E",
+    "Ж": "ZH", "З": "Z", "И": "I", "К": "K", "Л": "L", "М": "M",
+    "Н": "N", "О": "O", "П": "P", "Р": "R", "С": "S", "Т": "T",
+    "У": "U", "Ф": "F", "Х": "KH", "Ц": "TS", "Ч": "CH", "Ш": "SH",
+    "Щ": "SCH", "Э": "E", "Ю": "YU", "Я": "YA",
+}
 SOURCE_KINDS = {
     "article",
     "book",
@@ -142,16 +154,52 @@ def add_internal_hyperlink(paragraph, text: str, anchor: str) -> None:
     paragraph._p.append(hyperlink)
 
 
+def figure_bookmark_name(number: str) -> str:
+    """Return a Word-safe stable bookmark name for a figure number."""
+    normalized = number.strip().upper()
+    match = re.fullmatch(r"([А-ЯЁ])\.(\d+)", normalized)
+    if match:
+        letter = CYRILLIC_BOOKMARK_LETTERS.get(match.group(1), f"CYR{ord(match.group(1))}")
+        return f"_ReportFigure_{letter}_{match.group(2)}"
+    return "_ReportFigure_" + re.sub(r"[^A-Z0-9_]", "_", normalized)
+
+
+def add_bookmark(document: Document, paragraph, name: str) -> None:
+    """Mark a caption as an internal-link destination without visible text."""
+    used = [
+        int(node.get(qn("w:id"), "0"))
+        for node in document.element.xpath(".//w:bookmarkStart")
+        if node.get(qn("w:id"), "").isdigit()
+    ]
+    bookmark_id = max(used, default=0) + 1
+    start = OxmlElement("w:bookmarkStart")
+    start.set(qn("w:id"), str(bookmark_id))
+    start.set(qn("w:name"), name)
+    end = OxmlElement("w:bookmarkEnd")
+    end.set(qn("w:id"), str(bookmark_id))
+    paragraph._p.insert(1 if paragraph._p.pPr is not None else 0, start)
+    paragraph._p.append(end)
+
+
 def add_report_text(paragraph, text: str) -> None:
-    """Write body text and turn course-paper [N] citations into internal links."""
+    """Write body text and turn source and figure references into internal links."""
+    matches: list[tuple[int, int, str, Any]] = []
+    matches.extend((match.start(), match.end(), "source", match) for match in CITATION_PATTERN.finditer(text))
+    matches.extend((match.start(), match.end(), "figure", match) for match in FIGURE_REFERENCE_PATTERN.finditer(text))
+    matches.sort(key=lambda item: item[0])
     cursor = 0
-    for match in CITATION_PATTERN.finditer(text):
-        if match.start() > cursor:
-            run = paragraph.add_run(text[cursor:match.start()])
+    for start, end, kind, match in matches:
+        if start < cursor:
+            continue
+        if start > cursor:
+            run = paragraph.add_run(text[cursor:start])
             set_run_font(run, "Times New Roman", 14)
-        number = int(match.group(1))
-        add_internal_hyperlink(paragraph, match.group(0), f"_ReportBib{number}")
-        cursor = match.end()
+        if kind == "source":
+            number = int(match.group(1))
+            add_internal_hyperlink(paragraph, match.group(0), f"_ReportBib{number}")
+        else:
+            add_internal_hyperlink(paragraph, match.group(0), figure_bookmark_name(match.group("number")))
+        cursor = end
     if cursor < len(text):
         run = paragraph.add_run(text[cursor:])
         set_run_font(run, "Times New Roman", 14)
@@ -728,7 +776,8 @@ def add_figure(document: Document, block: dict[str, Any]) -> None:
     if caption.endswith("."):
         raise SpecError("figure caption must not end with a period")
     label = f"Рисунок {number} — {caption}"
-    document.add_paragraph(label, style="Report Caption")
+    caption_paragraph = document.add_paragraph(label, style="Report Caption")
+    add_bookmark(document, caption_paragraph, figure_bookmark_name(number))
 
 
 def set_paragraph_border(paragraph, *, size: int = 4, color: str = "000000") -> None:
@@ -783,7 +832,8 @@ def add_figure_placeholder(document: Document, block: dict[str, Any]) -> None:
     # Intentionally keep the reserved area empty. Editorial instructions such as
     # "insert a screenshot" must never leak into the submitted report.
     label = f"Рисунок {number} — {caption}"
-    document.add_paragraph(label, style="Report Caption")
+    caption_paragraph = document.add_paragraph(label, style="Report Caption")
+    add_bookmark(document, caption_paragraph, figure_bookmark_name(number))
 
 
 def set_repeat_table_header(row) -> None:

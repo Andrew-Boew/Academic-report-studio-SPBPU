@@ -93,7 +93,7 @@ def rasterize(pdf: Path, output_dir: Path, dpi: int) -> int:
         finally:
             document.close()
 
-    pdftoppm = shutil.which("pdftoppm")
+    pdftoppm = os.environ.get("PDFTOPPM_BIN") or shutil.which("pdftoppm")
     if pdftoppm:
         prefix = output_dir / "page"
         result = subprocess.run(
