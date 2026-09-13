@@ -24,6 +24,18 @@ TABLE_CONTINUATION = re.compile(rf"^(Продолжение|Окончание)\
 FIGURE_CAPTION = re.compile(rf"^Рисунок\s+({OBJECT_NUMBER})\s+—\s+\S.*$", re.I)
 LISTING_CAPTION = re.compile(rf"^Листинг\s+({OBJECT_NUMBER})\s+—\s+\S.*$", re.I)
 MANUAL_HEADING_NUMBER = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+")
+FIGURE_REFERENCE = re.compile(
+    r"\bрис(?:унок|унка|унке|унках|унков|унку|\.?)\s+"
+    r"((?:[А-ЯЁ]\.)?\d+)",
+    re.IGNORECASE,
+)
+CYRILLIC_BOOKMARK_LETTERS = {
+    "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E",
+    "Ж": "ZH", "З": "Z", "И": "I", "К": "K", "Л": "L", "М": "M",
+    "Н": "N", "О": "O", "П": "P", "Р": "R", "С": "S", "Т": "T",
+    "У": "U", "Ф": "F", "Х": "KH", "Ц": "TS", "Ч": "CH", "Ш": "SH",
+    "Щ": "SCH", "Э": "E", "Ю": "YU", "Я": "YA",
+}
 
 
 def near(value: float, expected: float, tolerance: float = 0.03) -> bool:
@@ -67,6 +79,15 @@ def warn_numeric_gaps(numbers: list[str], label: str, warnings: list[str]) -> No
         expected = list(range(1, len(values) + 1))
         if values != expected:
             warnings.append(f"Нарушена последовательная сквозная нумерация {label}: {values}")
+
+
+def figure_bookmark_name(number: str) -> str:
+    normalized = number.strip().upper()
+    match = re.fullmatch(r"([А-ЯЁ])\.(\d+)", normalized)
+    if match:
+        letter = CYRILLIC_BOOKMARK_LETTERS.get(match.group(1), f"CYR{ord(match.group(1))}")
+        return f"_ReportFigure_{letter}_{match.group(2)}"
+    return "_ReportFigure_" + re.sub(r"[^A-Z0-9_]", "_", normalized)
 
 
 def inspect(path: Path) -> dict[str, Any]:
@@ -638,6 +659,23 @@ def inspect(path: Path) -> dict[str, Any]:
     for number in figure_numbers:
         if not re.search(rf"\bрисунк\w*\s+{re.escape(number)}\b", narrative_text, re.I):
             errors.append(f"В тексте отсутствует ссылка на рисунок {number}")
+        figure_bookmark = figure_bookmark_name(number)
+        if figure_bookmark not in bookmarks:
+            errors.append(f"У подписи рисунка {number} отсутствует закладка для перекрёстной ссылки")
+    for paragraph in document.paragraphs:
+        value = paragraph.text.strip()
+        if not value or FIGURE_CAPTION.fullmatch(value):
+            continue
+        linked_anchors = {
+            link.get(qn("w:anchor"), "")
+            for link in paragraph._p.xpath(".//w:hyperlink[@w:anchor]")
+        }
+        for match in FIGURE_REFERENCE.finditer(value):
+            figure_bookmark = figure_bookmark_name(match.group(1))
+            if figure_bookmark not in linked_anchors:
+                errors.append(
+                    f"Ссылка на рисунок {match.group(1)} должна быть внутренней гиперссылкой"
+                )
     for number in table_numbers:
         if not re.search(rf"\bтабл(?:иц\w*|\.)\s+{re.escape(number)}\b", narrative_text, re.I):
             errors.append(f"В тексте отсутствует ссылка на таблицу {number}")
