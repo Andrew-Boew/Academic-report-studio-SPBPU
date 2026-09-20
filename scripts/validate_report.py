@@ -29,6 +29,9 @@ FIGURE_REFERENCE = re.compile(
     r"((?:[А-ЯЁ]\.)?\d+)",
     re.IGNORECASE,
 )
+TABLE_REFERENCE = re.compile(r"\bтабл\w*\s+((?:[А-ЯЁ]\.)?\d+(?:\.\d+)*)", re.I)
+LISTING_REFERENCE = re.compile(r"\bлистинг\w*\s+((?:[А-ЯЁ]\.)?\d+(?:\.\d+)*)", re.I)
+EQUATION_REFERENCE = re.compile(r"\(((?:[А-ЯЁ]\.)?\d+(?:\.\d+)*)\)")
 CYRILLIC_BOOKMARK_LETTERS = {
     "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E",
     "Ж": "ZH", "З": "Z", "И": "I", "К": "K", "Л": "L", "М": "M",
@@ -79,6 +82,15 @@ def warn_numeric_gaps(numbers: list[str], label: str, warnings: list[str]) -> No
         expected = list(range(1, len(values) + 1))
         if values != expected:
             warnings.append(f"Нарушена последовательная сквозная нумерация {label}: {values}")
+
+
+def object_bookmark_name(kind: str, number: str) -> str:
+    normalized = number.strip().upper()
+    match = re.fullmatch(r"([А-ЯЁ])\.(\d+)", normalized)
+    if match:
+        letter = CYRILLIC_BOOKMARK_LETTERS.get(match.group(1), f"CYR{ord(match.group(1))}")
+        return f"_Report{kind}_{letter}_{match.group(2)}"
+    return f"_Report{kind}_" + re.sub(r"[^A-Z0-9_]", "_", normalized)
 
 
 def figure_bookmark_name(number: str) -> str:
@@ -821,9 +833,19 @@ def inspect(path: Path) -> dict[str, Any]:
         figure_bookmark = figure_bookmark_name(number)
         if figure_bookmark not in bookmarks:
             errors.append(f"У подписи рисунка {number} отсутствует закладка для перекрёстной ссылки")
+    known_equation_numbers = {number.upper() for number in equation_numbers}
     for paragraph in document.paragraphs:
         value = paragraph.text.strip()
-        if not value or FIGURE_CAPTION.fullmatch(value):
+        if (
+            not value
+            or FIGURE_CAPTION.fullmatch(value)
+            or TABLE_CAPTION.fullmatch(value)
+            or TABLE_CONTINUATION.fullmatch(value)
+            or LISTING_CAPTION.fullmatch(value)
+        ):
+            continue
+        if paragraph.style and paragraph.style.name.startswith("Report Equation"):
+            # The "(N)" here is the formula's own label, not a reference.
             continue
         linked_anchors = {
             link.get(qn("w:anchor"), "")
@@ -834,6 +856,46 @@ def inspect(path: Path) -> dict[str, Any]:
             if figure_bookmark not in linked_anchors:
                 errors.append(
                     f"Ссылка на рисунок {match.group(1)} должна быть внутренней гиперссылкой"
+                )
+        for match in TABLE_REFERENCE.finditer(value):
+            anchor = object_bookmark_name("Table", match.group(1))
+            if anchor not in linked_anchors:
+                errors.append(
+                    f"Ссылка на таблицу {match.group(1)} должна быть внутренней гиперссылкой"
+                )
+        for match in LISTING_REFERENCE.finditer(value):
+            anchor = object_bookmark_name("Listing", match.group(1))
+            if anchor not in linked_anchors:
+                errors.append(
+                    f"Ссылка на листинг {match.group(1)} должна быть внутренней гиперссылкой"
+                )
+        for match in EQUATION_REFERENCE.finditer(value):
+            number = match.group(1).upper()
+            if number in known_equation_numbers:
+                anchor = object_bookmark_name("Equation", match.group(1))
+                if anchor not in linked_anchors:
+                    errors.append(
+                        f"Ссылка на формулу ({match.group(1)}) должна быть внутренней гиперссылкой"
+                    )
+        if paragraph.style and paragraph.style.name in {"Normal", "List Bullet", "List Number"}:
+            # Plain-text pseudo-formulas are forbidden: every expression with
+            # operations must be an inline OMML equation ($...$ in the spec).
+            for match in re.finditer(r"[A-Za-z0-9]+\s*[·×]\s*[A-Za-z0-9]+", value):
+                fragment = match.group(0)
+                if any(ch.isascii() and ch.isalpha() for ch in fragment):
+                    errors.append(
+                        f"Выражение {fragment!r} набрано обычным текстом; оформите его "
+                        "inline-формулой $…$ (m:oMath), а не буквами со знаком умножения"
+                    )
+            for match in re.finditer(r"(?<![A-Za-z0-9])[A-Za-z]\s*/\s*[A-Za-z0-9](?![A-Za-z0-9])", value):
+                errors.append(
+                    f"Дробь {match.group(0)!r} записана через слэш; оформите её "
+                    "inline-формулой $…$ с настоящей дробью OMML"
+                )
+            for match in re.finditer(r"\b[A-Za-z]\s*=\s*\S", value):
+                errors.append(
+                    f"Равенство {match.group(0)!r} набрано обычным текстом; оформите его "
+                    "inline-формулой $…$ (m:oMath)"
                 )
     for number in table_numbers:
         if not re.search(rf"\bтабл(?:иц\w*|\.)\s+{re.escape(number)}\b", narrative_text, re.I):
@@ -966,8 +1028,11 @@ def inspect(path: Path) -> dict[str, Any]:
                                 small_runs.append(f"{row_index}:{cell_index}={half_points / 2:g}pt")
                         if row_index == 1:
                             bold = run.find("./" + qn("w:rPr") + "/" + qn("w:b"))
-                            if bold is None or bold.get(qn("w:val"), "true") not in {"true", "1", "on"}:
-                                errors.append(f"Таблица {content_tables}: текст шапки должен быть полужирным")
+                            if bold is not None and bold.get(qn("w:val"), "true") in {"true", "1", "on"}:
+                                errors.append(
+                                    f"Таблица {content_tables}: полужирный в таблице не применяется "
+                                    "(ГОСТ 7.32-2017 6.1.1 — только для заголовков разделов)"
+                                )
                                 break
             if small_runs:
                 errors.append(
