@@ -25,7 +25,7 @@ def qn(name: str) -> str:
 
 
 def normalized(value: str) -> str:
-    value = value.replace("\u00a0", " ").replace("–", "—")
+    value = value.replace("\u00a0", " ").replace("—", "–")
     return re.sub(r"\s+", " ", value).strip().casefold()
 
 

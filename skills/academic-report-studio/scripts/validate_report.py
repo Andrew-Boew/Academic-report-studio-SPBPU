@@ -19,10 +19,10 @@ from docx.oxml.ns import qn
 
 PLACEHOLDER = re.compile(r"\{\{|\}\}|\b(?:TODO|TBD|FIXME)\b|\[вставить[^\]]*\]", re.I)
 OBJECT_NUMBER = r"(?:[А-ЯЁ]\.\d+|\d+(?:\.\d+)*)"
-TABLE_CAPTION = re.compile(rf"^Таблица\s+({OBJECT_NUMBER})\s+—\s+\S.*$", re.I)
+TABLE_CAPTION = re.compile(rf"^Таблица\s+({OBJECT_NUMBER})\s+–\s+\S.*$", re.I)
 TABLE_CONTINUATION = re.compile(rf"^(Продолжение|Окончание)\s+таблицы\s+({OBJECT_NUMBER})$", re.I)
-FIGURE_CAPTION = re.compile(rf"^Рисунок\s+({OBJECT_NUMBER})\s+—\s+\S.*$", re.I)
-LISTING_CAPTION = re.compile(rf"^Листинг\s+({OBJECT_NUMBER})\s+—\s+\S.*$", re.I)
+FIGURE_CAPTION = re.compile(rf"^Рисунок\s+({OBJECT_NUMBER})\s+–\s+\S.*$", re.I)
+LISTING_CAPTION = re.compile(rf"^Листинг\s+({OBJECT_NUMBER})\s+–\s+\S.*$", re.I)
 MANUAL_HEADING_NUMBER = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+")
 FIGURE_REFERENCE = re.compile(
     r"\bрис(?:унок|унка|унке|унках|унков|унку|\.?)\s+"
@@ -141,8 +141,8 @@ def inspect(path: Path) -> dict[str, Any]:
     if page_start != "0":
         errors.append("На титульном листе номер должен быть скрыт, а первая страница содержания должна иметь номер 1")
     footer_paragraphs = first_section.footer.paragraphs
-    if not footer_paragraphs or effective_alignment(footer_paragraphs[0]) != WD_ALIGN_PARAGRAPH.RIGHT:
-        errors.append("Номер страницы должен располагаться справа внизу")
+    if not footer_paragraphs or effective_alignment(footer_paragraphs[0]) != WD_ALIGN_PARAGRAPH.CENTER:
+        errors.append("Номер страницы должен располагаться по центру нижнего колонтитула")
 
     normal = document.styles["Normal"]
     font_name = style_font_name(normal)
@@ -726,7 +726,7 @@ def inspect(path: Path) -> dict[str, Any]:
                     previous_text = xml_text(previous) if previous.tag == qn("w:p") else "<table>"
                     break
                 if not LISTING_CAPTION.fullmatch(previous_text):
-                    errors.append("Рамка короткого кода должна иметь подпись `Листинг N — Название` непосредственно сверху")
+                    errors.append("Рамка короткого кода должна иметь подпись `Листинг N – Название` непосредственно сверху")
                 rows = item.findall("./" + qn("w:tr"))
                 cells = item.findall("./" + qn("w:tr") + "/" + qn("w:tc"))
                 if len(rows) != 1 or len(cells) != 1:

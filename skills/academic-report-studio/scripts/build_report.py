@@ -183,6 +183,7 @@ def add_bookmark(document: Document, paragraph, name: str) -> None:
 
 def add_report_text(paragraph, text: str) -> None:
     """Write body text and turn source and figure references into internal links."""
+    text = text.replace("—", "–")
     matches: list[tuple[int, int, str, Any]] = []
     matches.extend((match.start(), match.end(), "source", match) for match in CITATION_PATTERN.finditer(text))
     matches.extend((match.start(), match.end(), "figure", match) for match in FIGURE_REFERENCE_PATTERN.finditer(text))
@@ -479,7 +480,7 @@ def add_field(paragraph, instruction: str, placeholder: str = "") -> None:
 
 
 def add_page_number(paragraph) -> None:
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     paragraph.paragraph_format.first_line_indent = Cm(0)
     add_field(paragraph, " PAGE ", "1")
 
@@ -668,7 +669,7 @@ def add_heading(document: Document, block: dict[str, Any]) -> None:
     level = int(block.get("level", 1))
     if level not in (1, 2, 3):
         raise SpecError(f"Heading level must be 1, 2, or 3: {level}")
-    text = clean_text(block.get("text"), field="heading")
+    text = clean_text(block.get("text"), field="heading").replace("—", "–")
     if MANUAL_HEADING_NUMBER.match(text):
         raise SpecError(
             f"Heading text must not contain a manually typed number; Word numbers headings automatically: {text!r}"
@@ -722,7 +723,7 @@ def add_paragraph_block(document: Document, block: dict[str, Any]) -> None:
         paragraph.alignment = alignments[alignment]
     if "first_indent_cm" in block:
         paragraph.paragraph_format.first_line_indent = Cm(float(block["first_indent_cm"]))
-    prefix = str(block.get("bold_prefix", ""))
+    prefix = str(block.get("bold_prefix", "")).replace("—", "–")
     if PLACEHOLDER_PATTERN.search(prefix):
         raise SpecError(f"Placeholder detected in bold_prefix: {prefix[:80]}")
     if prefix and not prefix.endswith((" ", "\u00a0")):
@@ -770,12 +771,12 @@ def add_figure(document: Document, block: dict[str, Any]) -> None:
     number = clean_text(block.get("number", ""), field="figure number")
     if not number:
         raise SpecError("figure requires a number")
-    caption = clean_text(block.get("caption", ""), field="figure caption")
+    caption = clean_text(block.get("caption", ""), field="figure caption").replace("—", "–")
     if not caption:
         raise SpecError("figure requires a caption")
     if caption.endswith("."):
         raise SpecError("figure caption must not end with a period")
-    label = f"Рисунок {number} — {caption}"
+    label = f"Рисунок {number} – {caption}"
     caption_paragraph = document.add_paragraph(label, style="Report Caption")
     add_bookmark(document, caption_paragraph, figure_bookmark_name(number))
 
@@ -799,7 +800,7 @@ def set_paragraph_border(paragraph, *, size: int = 4, color: str = "000000") -> 
 
 def add_figure_placeholder(document: Document, block: dict[str, Any]) -> None:
     number = clean_text(block.get("number", ""), field="figure placeholder number")
-    caption = clean_text(block.get("caption", ""), field="figure placeholder caption")
+    caption = clean_text(block.get("caption", ""), field="figure placeholder caption").replace("—", "–")
     if not number or not caption:
         raise SpecError("figure_placeholder requires number and caption")
     width = float(block.get("width_cm", 15.5))
@@ -831,7 +832,7 @@ def add_figure_placeholder(document: Document, block: dict[str, Any]) -> None:
     paragraph.paragraph_format.first_line_indent = Cm(0)
     # Intentionally keep the reserved area empty. Editorial instructions such as
     # "insert a screenshot" must never leak into the submitted report.
-    label = f"Рисунок {number} — {caption}"
+    label = f"Рисунок {number} – {caption}"
     caption_paragraph = document.add_paragraph(label, style="Report Caption")
     add_bookmark(document, caption_paragraph, figure_bookmark_name(number))
 
@@ -1063,7 +1064,7 @@ def add_table(document: Document, block: dict[str, Any]) -> None:
     number = clean_text(block.get("number", ""), field="table number")
     if not number:
         raise SpecError("table requires a number")
-    caption = clean_text(block.get("caption", ""), field="table caption")
+    caption = clean_text(block.get("caption", ""), field="table caption").replace("—", "–")
     if not caption:
         raise SpecError("table requires a caption")
     if caption.endswith("."):
@@ -1090,7 +1091,7 @@ def add_table(document: Document, block: dict[str, Any]) -> None:
     keep_previous_reference(document)
     for part_index, part_rows in enumerate(parts):
         if part_index == 0:
-            label = f"Таблица {number} — {caption}"
+            label = f"Таблица {number} – {caption}"
         elif use_final_label and part_index == len(parts) - 1:
             label = f"Окончание таблицы {number}"
         else:
@@ -1227,7 +1228,7 @@ def add_code(document: Document, block: dict[str, Any]) -> None:
     presentation = str(block.get("presentation", "fragment")).strip().lower()
     if presentation not in {"fragment", "appendix"}:
         raise SpecError("code presentation must be 'fragment' or 'appendix'")
-    caption = str(block.get("caption", "")).strip()
+    caption = str(block.get("caption", "")).strip().replace("—", "–")
     number = str(block.get("number", "")).strip()
     if presentation == "fragment":
         if not caption or not number:
@@ -1235,7 +1236,7 @@ def add_code(document: Document, block: dict[str, Any]) -> None:
         if caption.endswith("."):
             raise SpecError("listing caption must not end with a period")
         keep_previous_reference(document)
-        paragraph = document.add_paragraph(f"Листинг {number} — {caption}", style="Report Table Caption")
+        paragraph = document.add_paragraph(f"Листинг {number} – {caption}", style="Report Table Caption")
         paragraph.paragraph_format.keep_with_next = True
     lines = text.expandtabs(4).splitlines() or [""]
     if presentation == "fragment":
