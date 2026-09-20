@@ -739,10 +739,8 @@ def inspect(path: Path) -> dict[str, Any]:
             effective_before = spacing.space_before or paragraph.style.paragraph_format.space_before
             effective_after = spacing.space_after or paragraph.style.paragraph_format.space_after
             effective_line = spacing.line_spacing or paragraph.style.paragraph_format.line_spacing
-            if effective_before is None or not near(effective_before.pt, 21.0, 0.1):
-                errors.append(
-                    "Абзац формулы должен иметь зазор сверху, эквивалентный одной пустой строке (21 pt)"
-                )
+            if effective_before is None or not near(effective_before.pt, 8.0, 0.1):
+                errors.append("Абзац формулы должен иметь зазор перед 8 pt, отделяющий его от текста")
             if effective_after is None or not near(effective_after.pt, 0.0, 0.1):
                 errors.append("Абзац формулы должен иметь интервал после 0 pt")
             if not isinstance(effective_line, float) or not near(effective_line, 1.5, 0.01):

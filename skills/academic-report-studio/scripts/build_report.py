@@ -57,11 +57,17 @@ LEGACY_FORMAT_PROFILES = {"spbpu": "unified", "student_default": "unified"}
 ACTIVE_FORMAT_PROFILE_NAME = "unified"
 ACTIVE_FORMAT_PROFILE = FORMAT_PROFILES["unified"]
 MAX_CONTENT_WIDTH_CM = 16.5
-# tr23-26 3.3.3/3.6.6/3.7.3 and GOST 7.32-2017 6.8.1 require one free line
-# before headings and around figures, tables and formulas. The gap is set by
-# paragraph properties (never by empty paragraphs): one 14 pt line at 1.5
-# spacing equals 21 pt.
-BLANK_LINE_PT = 21.0
+# tr23-26 3.3.3/3.6.6/3.7.3 and GOST 7.32-2017 6.8.1 mention one free line
+# before headings and around figures, tables and formulas. The user confirmed
+# the compact rhythm of the previous profile instead: 0 pt everywhere, set by
+# paragraph properties (never by empty paragraphs). The constant stays as a
+# single switch; the deviation from the manuals is recorded in
+# references/spbpu-profile.md ("Решения конфликтов источников").
+BLANK_LINE_PT = 0.0
+# Objects (figures, tables, listings, equations) need visual separation from
+# body text: a moderate 8 pt gap above and below, set by paragraph properties.
+# Headings stay at 0 pt — the user-confirmed tight heading look.
+OBJECT_GAP_PT = 8.0
 OMML_NAMESPACES = {"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}
 PLACEHOLDER_PATTERN = re.compile(r"\{\{|\}\}|\b(?:TODO|TBD|FIXME)\b|\[вставить[^\]]*\]", re.I)
 MANUAL_HEADING_NUMBER = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+")
@@ -140,7 +146,7 @@ def request_gap_after_object() -> None:
 def apply_pending_gap(paragraph_format) -> None:
     if _PENDING_OBJECT_GAP["active"]:
         _PENDING_OBJECT_GAP["active"] = False
-        paragraph_format.space_before = Pt(BLANK_LINE_PT)
+        paragraph_format.space_before = Pt(OBJECT_GAP_PT)
 
 
 def clear_pending_gap() -> None:
@@ -1349,12 +1355,10 @@ def add_heading(document: Document, block: dict[str, Any]) -> None:
         # number begins at 1.25 cm in both Word and LibreOffice.
         paragraph.paragraph_format.left_indent = Cm(0)
         paragraph.paragraph_format.first_line_indent = Cm(1.25)
-        # tr23-26 3.3.3: one free line between the previous text or object and
-        # the next heading. Between consecutive headings (a section heading and
-        # its first subsection) the manual example keeps no free line.
-        paragraph.paragraph_format.space_before = Pt(
-            0 if page_break_before or _LAST_BLOCK_KIND["kind"] == "heading" else BLANK_LINE_PT
-        )
+        # Headings keep the confirmed tight look: 0 pt before, both after
+        # text and after another heading (the tr23-26 3.3.3 "free line" is a
+        # documented deviation, see references/spbpu-profile.md).
+        paragraph.paragraph_format.space_before = Pt(0)
 
 
 def add_paragraph_block(document: Document, block: dict[str, Any]) -> None:
@@ -1597,8 +1601,8 @@ def add_figure(document: Document, block: dict[str, Any]) -> None:
     paragraph = document.add_paragraph()
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     paragraph.paragraph_format.first_line_indent = Cm(0)
-    # tr23-26 3.6.6: one free line between the text and the figure.
-    paragraph.paragraph_format.space_before = Pt(BLANK_LINE_PT)
+    # Moderate separation between the text and the figure.
+    paragraph.paragraph_format.space_before = Pt(OBJECT_GAP_PT)
     paragraph.paragraph_format.space_after = Pt(0)
     paragraph.paragraph_format.keep_with_next = True
     run = paragraph.add_run()
@@ -1974,7 +1978,7 @@ def add_table(document: Document, block: dict[str, Any]) -> None:
             add_bookmark(document, caption_paragraph, object_bookmark_name("Table", number))
         # tr23-26 3.7.3: one free line between the text and the table; the
         # continuation captions sit at the top of a fresh page and need no gap.
-        caption_paragraph.paragraph_format.space_before = Pt(BLANK_LINE_PT if part_index == 0 else 0)
+        caption_paragraph.paragraph_format.space_before = Pt(OBJECT_GAP_PT if part_index == 0 else 0)
         caption_paragraph.paragraph_format.space_after = Pt(0)
         add_table_part(
             document,
@@ -2023,9 +2027,9 @@ def latex_to_omath(latex: str):
 def add_equation(document: Document, block: dict[str, Any]) -> None:
     clear_pending_gap()
     paragraph = document.add_paragraph(style="Report Equation")
-    # GOST 7.32-2017 6.8.1 / tr23-26 3.9.1: at least one free line above and
-    # below every formula; the gap below is requested from the next paragraph.
-    paragraph.paragraph_format.space_before = Pt(BLANK_LINE_PT)
+    # Moderate separation between the text and the formula; the gap below is
+    # requested from the next paragraph.
+    paragraph.paragraph_format.space_before = Pt(OBJECT_GAP_PT)
     number = str(block.get("number", "")).strip()
     if number:
         paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
