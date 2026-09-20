@@ -110,6 +110,23 @@ def inspect(path: Path) -> dict[str, Any]:
         errors.append(f"DOCX не открывается: {type(exc).__name__}: {exc}")
         return {"path": str(path), "errors": errors, "warnings": warnings, "passed": False}
 
+    keywords = document.core_properties.keywords or ""
+    marker = "academic-report-format-profile:"
+    format_profile = keywords.split(marker, 1)[1].split()[0].strip() if marker in keywords else "spbpu"
+    if format_profile not in {"student_default", "spbpu"}:
+        errors.append(f"Неизвестный профиль оформления в свойствах DOCX: {format_profile}")
+        format_profile = "spbpu"
+    strict_spbpu = format_profile == "spbpu"
+    expected_right_margin = 1.0 if strict_spbpu else 1.5
+    expected_page_start = "1" if strict_spbpu else "0"
+    expected_caption_spacing = 1.0 if strict_spbpu else 1.5
+    expected_toc_indents = (
+        {"TOC 1": 0.0, "TOC 2": 0.5, "TOC 3": 1.0}
+        if strict_spbpu else
+        {"TOC 1": 0.0, "TOC 2": 1.25, "TOC 3": 2.5}
+    )
+    expected_table_size_pt = 12.0 if strict_spbpu else 14.0
+
     if not document.sections:
         errors.append("В документе отсутствуют секции")
     for index, section in enumerate(document.sections, 1):
@@ -125,7 +142,7 @@ def inspect(path: Path) -> dict[str, Any]:
             )
         checks = (
             ("левое поле", section.left_margin.cm, 3.0),
-            ("правое поле", section.right_margin.cm, 1.5),
+            ("правое поле", section.right_margin.cm, expected_right_margin),
             ("верхнее поле", section.top_margin.cm, 2.0),
             ("нижнее поле", section.bottom_margin.cm, 2.0),
         )
@@ -138,8 +155,10 @@ def inspect(path: Path) -> dict[str, Any]:
         errors.append("На титульном листе не отключён показ номера страницы")
     page_numbering = first_section._sectPr.find(qn("w:pgNumType"))
     page_start = page_numbering.get(qn("w:start")) if page_numbering is not None else None
-    if page_start != "0":
-        errors.append("На титульном листе номер должен быть скрыт, а первая страница содержания должна иметь номер 1")
+    if page_start != expected_page_start:
+        errors.append(
+            f"Профиль {format_profile}: начальное значение счётчика страниц должно быть {expected_page_start}"
+        )
     footer_paragraphs = first_section.footer.paragraphs
     if not footer_paragraphs or effective_alignment(footer_paragraphs[0]) != WD_ALIGN_PARAGRAPH.CENTER:
         errors.append("Номер страницы должен располагаться по центру нижнего колонтитула")
@@ -217,6 +236,12 @@ def inspect(path: Path) -> dict[str, Any]:
                 None,
             ) if abstract is not None else None
             indent = lvl.find(qn("w:pPr") + "/" + qn("w:ind")) if lvl is not None else None
+            label_node = lvl.find(qn("w:lvlText")) if lvl is not None else None
+            expected_labels = ("%1", "%1.%2", "%1.%2.%3") if strict_spbpu else ("%1.", "%1.%2.", "%1.%2.%3.")
+            if label_node is None or label_node.get(qn("w:val")) != expected_labels[level]:
+                errors.append(
+                    f"Уровень {level + 1}: неверный формат номера для профиля {format_profile}"
+                )
             if (
                 indent is None
                 or indent.get(qn("w:left")) != "1417"
@@ -246,8 +271,9 @@ def inspect(path: Path) -> dict[str, Any]:
             line_spacing = style.paragraph_format.line_spacing
             before = style.paragraph_format.space_before
             after = style.paragraph_format.space_after
-            if not isinstance(line_spacing, float) or not near(line_spacing, 1.5, 0.01):
-                errors.append(f"Стиль {name}: межстрочный интервал должен быть 1,5")
+            expected_spacing = expected_caption_spacing if name in {"Report Caption", "Report Table Caption"} else 1.5
+            if not isinstance(line_spacing, float) or not near(line_spacing, expected_spacing, 0.01):
+                errors.append(f"Стиль {name}: межстрочный интервал должен быть {expected_spacing:g}")
             if before is None or not near(before.pt, 0.0, 0.1):
                 errors.append(f"Стиль {name}: интервал перед должен быть 0 pt")
             if after is None or not near(after.pt, 0.0, 0.1):
@@ -303,7 +329,7 @@ def inspect(path: Path) -> dict[str, Any]:
     if "Обновите содержание в Word".encode("utf-8") in document_xml:
         warnings.append("После открытия в Word нужно обновить содержание (Ctrl+A, F9)")
 
-    toc_expected_indents = {"TOC 1": 0.0, "TOC 2": 1.25, "TOC 3": 2.5}
+    toc_expected_indents = expected_toc_indents
     for style_name, expected_indent in toc_expected_indents.items():
         if style_name not in [style.name for style in document.styles]:
             continue
@@ -354,8 +380,13 @@ def inspect(path: Path) -> dict[str, Any]:
         if not tabs:
             errors.append(f"Строка содержания не имеет правой табуляции с точечным заполнителем: {paragraph.text!r}")
             continue
-        if tabs[0].get(qn("w:pos")) != "9354":
-            errors.append("Правый табулятор содержания должен находиться внутри рабочей ширины 16,5 см")
+        expected_toc_tab_pos = "9638" if strict_spbpu else "9354"
+        if tabs[0].get(qn("w:pos")) != expected_toc_tab_pos:
+            expected_width_label = "17,0 см" if strict_spbpu else "16,5 см"
+            errors.append(
+                f"Правый табулятор содержания должен находиться на рабочей ширине {expected_width_label} "
+                f"(позиция {expected_toc_tab_pos} twips)"
+            )
         text_nodes = paragraph._p.xpath(".//w:t/text()")
         if not text_nodes or not text_nodes[-1].strip().isdigit():
             errors.append(f"В строке содержания отсутствует номер страницы: {paragraph.text!r}")
@@ -421,7 +452,10 @@ def inspect(path: Path) -> dict[str, Any]:
                     f"(прямой левый отступ 0 см, первая строка 1,25 см)"
                 )
         words = re.findall(r"[А-ЯЁа-яё]{3,}", value)
-        if words and len(words) >= 2 and all(word.isupper() for word in words):
+        if paragraph.style.name == "Report Structural Heading" and strict_spbpu:
+            if words and not all(word.isupper() for word in words):
+                errors.append(f"Структурный заголовок должен быть прописными: {value!r}")
+        elif words and len(words) >= 2 and all(word.isupper() for word in words):
             errors.append(f"Заголовок должен быть в регистре предложения, а не прописными: {value!r}")
 
     appendix_indices = [i for i, text in enumerate(heading_texts) if text.upper().startswith("ПРИЛОЖЕНИЕ")]
@@ -469,6 +503,34 @@ def inspect(path: Path) -> dict[str, Any]:
         narrative_citations.extend(int(value) for value in re.findall(r"\[(\d+)\]", paragraph.text))
     if report_type == "lab" and narrative_citations:
         errors.append("В лабораторной работе не должно быть ссылок на литературу вида [N]")
+    if strict_spbpu:
+        # SPbPU tr23-26 3.5.2: a simple enumeration level is a dash, not a bullet.
+        bullet_numbering = document.part.numbering_part.element
+        list_bullet_style = document.styles["List Bullet"]
+        bullet_num_pr = list_bullet_style._element.get_or_add_pPr().find(qn("w:numPr"))
+        bullet_marker_ok = False
+        if bullet_num_pr is not None:
+            bullet_num_id_node = bullet_num_pr.find(qn("w:numId"))
+            if bullet_num_id_node is not None:
+                bullet_num_id = bullet_num_id_node.get(qn("w:val"))
+                bullet_num = next(
+                    (node for node in bullet_numbering.findall(qn("w:num")) if node.get(qn("w:numId")) == bullet_num_id),
+                    None,
+                )
+                abstract_ref = bullet_num.find(qn("w:abstractNumId")) if bullet_num is not None else None
+                abstract = next(
+                    (
+                        node for node in bullet_numbering.findall(qn("w:abstractNum"))
+                        if node.get(qn("w:abstractNumId")) == (abstract_ref.get(qn("w:val")) if abstract_ref is not None else None)
+                    ),
+                    None,
+                )
+                lvl_text = abstract.find(".//" + qn("w:lvl") + "/" + qn("w:lvlText")) if abstract is not None else None
+                bullet_marker_ok = lvl_text is not None and lvl_text.get(qn("w:val")) == "–"
+        if not bullet_marker_ok:
+            errors.append(
+                "Профиль spbpu: первый уровень перечисления должен использовать тире (Word-нумерация с маркером «–»)"
+            )
     if report_type == "course":
         for number in narrative_citations:
             if number < 1 or number > len(bibliography_paragraphs):
@@ -533,8 +595,10 @@ def inspect(path: Path) -> dict[str, Any]:
                 errors.append(f"Подпись рисунка должна иметь интервал перед 0 pt: {text_value!r}")
             if effective_after is None or not near(effective_after.pt, 0.0, 0.1):
                 errors.append(f"Подпись рисунка должна иметь интервал после 0 pt: {text_value!r}")
-            if not isinstance(effective_line, float) or not near(effective_line, 1.5, 0.01):
-                errors.append(f"Подпись рисунка должна иметь межстрочный интервал 1,5: {text_value!r}")
+            if not isinstance(effective_line, float) or not near(effective_line, expected_caption_spacing, 0.01):
+                errors.append(
+                    f"Подпись рисунка должна иметь межстрочный интервал {expected_caption_spacing:g}: {text_value!r}"
+                )
         elif text_value.lower().startswith("таблица"):
             if not table_match:
                 errors.append(f"Некорректная подпись таблицы: {text_value!r}")
@@ -542,15 +606,20 @@ def inspect(path: Path) -> dict[str, Any]:
                 table_numbers.append(table_match.group(1).upper())
             if text_value.endswith("."):
                 errors.append(f"Точка в конце подписи таблицы: {text_value!r}")
-            if effective_alignment(paragraph) != WD_ALIGN_PARAGRAPH.CENTER:
-                errors.append(f"Подпись таблицы должна быть по центру: {text_value!r}")
+            expected_table_caption_alignment = (
+                WD_ALIGN_PARAGRAPH.LEFT if strict_spbpu else WD_ALIGN_PARAGRAPH.CENTER
+            )
+            if effective_alignment(paragraph) != expected_table_caption_alignment:
+                alignment_label = "слева" if strict_spbpu else "по центру"
+                errors.append(f"Подпись таблицы должна быть {alignment_label}: {text_value!r}")
         elif re.match(r"^(?:продолжение|окончание)\s+таблицы", text_value, re.I):
             if not continuation_match:
                 errors.append(f"Некорректная подпись переноса таблицы: {text_value!r}")
             else:
                 continuation_numbers.append(continuation_match.group(2).upper())
-            if effective_alignment(paragraph) != WD_ALIGN_PARAGRAPH.CENTER:
-                errors.append(f"Подпись продолжения таблицы должна быть по центру: {text_value!r}")
+            if effective_alignment(paragraph) != expected_table_caption_alignment:
+                alignment_label = "слева" if strict_spbpu else "по центру"
+                errors.append(f"Подпись продолжения таблицы должна быть {alignment_label}: {text_value!r}")
         elif text_value.lower().startswith("листинг"):
             if not listing_match:
                 errors.append(f"Некорректная подпись листинга: {text_value!r}")
@@ -803,7 +872,7 @@ def inspect(path: Path) -> dict[str, Any]:
                         if size is not None:
                             half_points = int(size.get(qn("w:val"), "0"))
                             font_name = fonts.get(qn("w:ascii")) if fonts is not None else None
-                            if half_points < 28:
+                            if half_points < round(expected_table_size_pt * 2):
                                 small_runs.append(f"{row_index}:{cell_index}={half_points / 2:g}pt")
                         if row_index == 1:
                             bold = run.find("./" + qn("w:rPr") + "/" + qn("w:b"))
@@ -812,7 +881,7 @@ def inspect(path: Path) -> dict[str, Any]:
                                 break
             if small_runs:
                 errors.append(
-                    f"Таблица {content_tables}: табличный текст меньше обязательных 14 pt: "
+                    f"Таблица {content_tables}: табличный текст меньше обязательных {expected_table_size_pt:g} pt: "
                     + ", ".join(small_runs[:10])
                 )
             shaded_cells = []
@@ -843,6 +912,7 @@ def inspect(path: Path) -> dict[str, Any]:
     return {
         "path": str(path),
         "report_type": report_type,
+        "format_profile": format_profile,
         "size_bytes": path.stat().st_size,
         "sections": len(document.sections),
         "paragraphs": sum(bool(p.text.strip()) for p in document.paragraphs),

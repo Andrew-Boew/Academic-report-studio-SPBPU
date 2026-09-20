@@ -40,6 +40,10 @@ def structural_heading(block: dict) -> bool:
 
 def collect_entries(spec: dict) -> list[dict]:
     levels = max(1, min(3, int((spec.get("document") or {}).get("toc_levels", 3))))
+    profile_name = str((spec.get("document") or {}).get("format_profile", "spbpu")).strip()
+    # student_default keeps the confirmed `1. Title` display form;
+    # SPbPU tr23-26 requires heading numbers without a trailing period.
+    heading_suffix = "" if profile_name == "spbpu" else "."
     entries: list[dict] = []
     counters = [0, 0, 0]
     for block in spec.get("content", []):
@@ -56,7 +60,9 @@ def collect_entries(spec: dict) -> list[dict]:
                         counters[index] = 0
                     if any(value == 0 for value in counters[:level]):
                         raise ValueError(f"Invalid heading hierarchy before: {text}")
-                    display_text = f"{'.'.join(str(value) for value in counters[:level])}. {text}"
+                    display_text = (
+                        f"{'.'.join(str(value) for value in counters[:level])}{heading_suffix} {text}"
+                    )
                 entries.append({"text": text, "display_text": display_text, "level": level})
         elif kind == "bibliography":
             text = str(block.get("title", "Список использованных источников")).strip()
@@ -159,7 +165,15 @@ def field_run(field_type: str) -> etree._Element:
     return run
 
 
-def entry_paragraph(entry: dict, *, first: bool, last: bool, instruction: str) -> etree._Element:
+def entry_paragraph(
+    entry: dict,
+    *,
+    first: bool,
+    last: bool,
+    instruction: str,
+    toc_tab_pos: str = "9354",
+    toc_left_twips: dict[int, str] | None = None,
+) -> etree._Element:
     paragraph = etree.Element(qn("p"))
     ppr = etree.SubElement(paragraph, qn("pPr"))
     style = etree.SubElement(ppr, qn("pStyle"))
@@ -168,10 +182,12 @@ def entry_paragraph(entry: dict, *, first: bool, last: bool, instruction: str) -
     tab = etree.SubElement(tabs, qn("tab"))
     tab.set(qn("val"), "right")
     tab.set(qn("leader"), "dot")
-    # A4 text width for 3.0 cm left and 1.5 cm right margins: 16.5 cm.
-    # Keeping the tab inside that boundary prevents Word from clipping or
-    # dropping page numbers that LibreOffice may still render outside it.
-    tab.set(qn("pos"), "9354")
+    # The tab sits exactly at the working text width so page numbers reach the
+    # right margin: 16.5 cm (9354 twips) for student_default and 17.0 cm
+    # (9638 twips) for spbpu. Keeping the tab inside that boundary
+    # prevents Word from clipping or dropping page numbers that LibreOffice
+    # may still render outside it.
+    tab.set(qn("pos"), toc_tab_pos)
     # Write the 1.5 line interval explicitly so the materialized contents keep
     # it even when the document TOC styles are missing or stale.
     spacing = etree.SubElement(ppr, qn("spacing"))
@@ -181,8 +197,10 @@ def entry_paragraph(entry: dict, *, first: bool, last: bool, instruction: str) -
     spacing.set(qn("lineRule"), "auto")
     indent = etree.SubElement(ppr, qn("ind"))
     # Contents hierarchy is expressed by paragraph indents, not by spaces:
-    # TOC 1 = 0 cm, TOC 2 = 1.25 cm, TOC 3 = 2.50 cm.
-    toc_left_twips = {1: "0", 2: "709", 3: "1417"}
+    # TOC 1 = 0 cm always; deeper levels follow the active profile
+    # (student_default: 1.25/2.50 cm, spbpu: 0.5/1.0 cm).
+    if toc_left_twips is None:
+        toc_left_twips = {1: "0", 2: "709", 3: "1417"}
     indent.set(qn("left"), toc_left_twips[entry["level"]])
     indent.set(qn("firstLine"), "0")
     if first:
@@ -252,7 +270,13 @@ def attach_heading_bookmarks(root: etree._Element, entries: list[dict]) -> None:
         next_id += 1
 
 
-def patch_docx(source: Path, output: Path, entries: list[dict]) -> None:
+def patch_docx(
+    source: Path,
+    output: Path,
+    entries: list[dict],
+    *,
+    format_profile: str = "spbpu",
+) -> None:
     with zipfile.ZipFile(source) as archive:
         infos = archive.infolist()
         members = {info.filename: archive.read(info.filename) for info in infos}
@@ -278,12 +302,17 @@ def patch_docx(source: Path, output: Path, entries: list[dict]) -> None:
         raise ValueError("End of Word TOC field not found")
     for candidate_index in range(end_index, index - 1, -1):
         parent.remove(siblings[candidate_index])
+    strict_spbpu = format_profile == "spbpu"
+    toc_tab_pos = "9638" if strict_spbpu else "9354"
+    toc_left_twips = {1: "0", 2: "284", 3: "567"} if strict_spbpu else {1: "0", 2: "709", 3: "1417"}
     for offset, entry in enumerate(entries):
         parent.insert(index + offset, entry_paragraph(
             entry,
             first=offset == 0,
             last=offset == len(entries) - 1,
             instruction=instruction,
+            toc_tab_pos=toc_tab_pos,
+            toc_left_twips=toc_left_twips,
         ))
     settings_root = etree.fromstring(members["word/settings.xml"])
     update_fields = settings_root.find(qn("updateFields"))
@@ -322,11 +351,14 @@ def main() -> int:
     if source == output:
         raise SystemExit("Use a distinct --output path")
     spec = json.loads(args.spec.read_text(encoding="utf-8"))
-    page_start = int((spec.get("document") or {}).get("page_number_start", 0))
+    document_settings = spec.get("document") or {}
+    profile_name = str(document_settings.get("format_profile", "spbpu")).strip()
+    default_page_start = 1 if profile_name == "spbpu" else 0
+    page_start = int(document_settings.get("page_number_start", default_page_start))
     entries = locate_pages(collect_entries(spec), args.rendered_pdf.expanduser().resolve(), page_start)
     if not entries:
         raise SystemExit("No TOC entries found in the specification")
-    patch_docx(source, output, entries)
+    patch_docx(source, output, entries, format_profile=profile_name)
     if args.entries_json:
         args.entries_json.parent.mkdir(parents=True, exist_ok=True)
         args.entries_json.write_text(json.dumps({"entries": entries}, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -29,6 +29,48 @@ from docx.shared import Cm, Pt, RGBColor
 from lxml import etree
 
 
+FORMAT_PROFILES: dict[str, dict[str, Any]] = {
+    "student_default": {
+        "left_margin_cm": 3.0,
+        "right_margin_cm": 1.5,
+        "top_margin_cm": 2.0,
+        "bottom_margin_cm": 2.0,
+        "page_number_start": 0,
+        "heading_labels": ("%1.", "%1.%2.", "%1.%2.%3."),
+        "uppercase_structural": False,
+        "table_caption_alignment": "center",
+        "table_font_size": 14.0,
+        "table_line_spacing": 1.5,
+        "caption_line_spacing": 1.5,
+        "toc_indents_cm": {1: 0.0, 2: 1.25, 3: 2.5},
+        "manual_table_continuations": False,
+        "automatic_hyphenation": False,
+        "strict_units": False,
+        "strict_appendices": False,
+        "dash_bullet_lists": False,
+    },
+    "spbpu": {
+        "left_margin_cm": 3.0,
+        "right_margin_cm": 1.0,
+        "top_margin_cm": 2.0,
+        "bottom_margin_cm": 2.0,
+        "page_number_start": 1,
+        "heading_labels": ("%1", "%1.%2", "%1.%2.%3"),
+        "uppercase_structural": True,
+        "table_caption_alignment": "left",
+        "table_font_size": 12.0,
+        "table_line_spacing": 1.0,
+        "caption_line_spacing": 1.0,
+        "toc_indents_cm": {1: 0.0, 2: 0.5, 3: 1.0},
+        "manual_table_continuations": True,
+        "automatic_hyphenation": True,
+        "strict_units": True,
+        "strict_appendices": True,
+        "dash_bullet_lists": True,
+    },
+}
+ACTIVE_FORMAT_PROFILE_NAME = "spbpu"
+ACTIVE_FORMAT_PROFILE = FORMAT_PROFILES[ACTIVE_FORMAT_PROFILE_NAME]
 MAX_CONTENT_WIDTH_CM = 16.5
 OMML_NAMESPACES = {"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}
 PLACEHOLDER_PATTERN = re.compile(r"\{\{|\}\}|\b(?:TODO|TBD|FIXME)\b|\[вставить[^\]]*\]", re.I)
@@ -67,6 +109,27 @@ DEFAULT_NEW_PAGE_HEADINGS = {
     "выводы",
     "заключение",
 }
+
+UNIT_PATTERN = re.compile(
+    r"(?<=\d)[ \t]+(?=(?:%|°[CFКС]|мм|см|дм|км|м|мг|г|кг|мл|л|мс|с|мин|ч|"
+    r"Гц|кГц|МГц|ГГц|В|кВ|А|мА|Вт|кВт|Па|кПа|МПа|байт|Кбайт|Мбайт|Гбайт)\b)",
+    re.IGNORECASE,
+)
+
+
+def profile_value(name: str) -> Any:
+    return ACTIVE_FORMAT_PROFILE[name]
+
+
+def content_width_cm() -> float:
+    return 21.0 - float(profile_value("left_margin_cm")) - float(profile_value("right_margin_cm"))
+
+
+def normalize_report_text(text: str) -> str:
+    text = text.replace("—", "–")
+    if profile_value("strict_units"):
+        text = UNIT_PATTERN.sub("\u00a0", text)
+    return text
 
 
 class SpecError(ValueError):
@@ -184,7 +247,7 @@ def add_bookmark(document: Document, paragraph, name: str) -> None:
 
 def add_report_text(paragraph, text: str) -> None:
     """Write body text and turn source and figure references into internal links."""
-    text = text.replace("—", "–")
+    text = normalize_report_text(text)
     matches: list[tuple[int, int, str, Any]] = []
     matches.extend((match.start(), match.end(), "source", match) for match in CITATION_PATTERN.finditer(text))
     matches.extend((match.start(), match.end(), "figure", match) for match in FIGURE_REFERENCE_PATTERN.finditer(text))
@@ -281,7 +344,7 @@ def configure_heading_numbering(document: Document) -> int:
     multi = OxmlElement("w:multiLevelType")
     multi.set(qn("w:val"), "multilevel")
     abstract.append(multi)
-    for level, label in enumerate(("%1.", "%1.%2.", "%1.%2.%3.")):
+    for level, label in enumerate(profile_value("heading_labels")):
         lvl = OxmlElement("w:lvl")
         lvl.set(qn("w:ilvl"), str(level))
         start = OxmlElement("w:start")
@@ -325,15 +388,81 @@ def configure_heading_numbering(document: Document) -> int:
     return num_id
 
 
+def configure_dash_bullet_numbering(document: Document) -> int:
+    """Link List Bullet to a real Word list whose marker is a dash (tr23-26 3.5.2)."""
+    numbering = document.part.numbering_part.element
+    abstract_ids = [
+        int(node.get(qn("w:abstractNumId"), "0"))
+        for node in numbering.findall(qn("w:abstractNum"))
+    ]
+    num_ids = [
+        int(node.get(qn("w:numId"), "0"))
+        for node in numbering.findall(qn("w:num"))
+    ]
+    abstract_id = max(abstract_ids, default=-1) + 1
+    num_id = max(num_ids, default=0) + 1
+
+    abstract = OxmlElement("w:abstractNum")
+    abstract.set(qn("w:abstractNumId"), str(abstract_id))
+    multi = OxmlElement("w:multiLevelType")
+    multi.set(qn("w:val"), "singleLevel")
+    abstract.append(multi)
+    lvl = OxmlElement("w:lvl")
+    lvl.set(qn("w:ilvl"), "0")
+    start = OxmlElement("w:start")
+    start.set(qn("w:val"), "1")
+    num_fmt = OxmlElement("w:numFmt")
+    num_fmt.set(qn("w:val"), "bullet")
+    lvl_text = OxmlElement("w:lvlText")
+    lvl_text.set(qn("w:val"), "–")
+    suffix = OxmlElement("w:suff")
+    suffix.set(qn("w:val"), "space")
+    lvl_jc = OxmlElement("w:lvlJc")
+    lvl_jc.set(qn("w:val"), "left")
+    ppr = OxmlElement("w:pPr")
+    indent = OxmlElement("w:ind")
+    # The dash starts at the 1.25 cm paragraph indent; wrapped lines align
+    # 0.63 cm further right, right after the dash and its space.
+    indent.set(qn("w:left"), "1066")
+    indent.set(qn("w:hanging"), "357")
+    ppr.append(indent)
+    rpr = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    for key in ("ascii", "hAnsi", "eastAsia", "cs"):
+        fonts.set(qn(f"w:{key}"), "Times New Roman")
+    rpr.append(fonts)
+    for child in (start, num_fmt, lvl_text, suffix, lvl_jc, ppr, rpr):
+        lvl.append(child)
+    abstract.append(lvl)
+
+    first_num = numbering.find(qn("w:num"))
+    if first_num is None:
+        numbering.append(abstract)
+    else:
+        numbering.insert(numbering.index(first_num), abstract)
+    num = OxmlElement("w:num")
+    num.set(qn("w:numId"), str(num_id))
+    reference = OxmlElement("w:abstractNumId")
+    reference.set(qn("w:val"), str(abstract_id))
+    num.append(reference)
+    numbering.append(num)
+    set_style_numbering(document.styles["List Bullet"], level=0, num_id=num_id)
+
+    style = document.styles["List Bullet"]
+    style.paragraph_format.left_indent = Cm(1066 / 567)
+    style.paragraph_format.first_line_indent = Cm(-357 / 567)
+    return num_id
+
+
 def configure_document(document: Document, page_start: int) -> None:
     section = document.sections[0]
     section.orientation = WD_ORIENT.PORTRAIT
     section.page_width = Cm(21.0)
     section.page_height = Cm(29.7)
-    section.left_margin = Cm(3.0)
-    section.right_margin = Cm(1.5)
-    section.top_margin = Cm(2.0)
-    section.bottom_margin = Cm(2.0)
+    section.left_margin = Cm(float(profile_value("left_margin_cm")))
+    section.right_margin = Cm(float(profile_value("right_margin_cm")))
+    section.top_margin = Cm(float(profile_value("top_margin_cm")))
+    section.bottom_margin = Cm(float(profile_value("bottom_margin_cm")))
     section.header_distance = Cm(1.0)
     section.footer_distance = Cm(1.0)
     section.different_first_page_header_footer = True
@@ -344,6 +473,13 @@ def configure_document(document: Document, page_start: int) -> None:
         pg_num_type = OxmlElement("w:pgNumType")
         sect_pr.append(pg_num_type)
     pg_num_type.set(qn("w:start"), str(page_start))
+
+    settings = document.settings._element
+    auto_hyphenation = settings.find(qn("w:autoHyphenation"))
+    if auto_hyphenation is None:
+        auto_hyphenation = OxmlElement("w:autoHyphenation")
+        settings.append(auto_hyphenation)
+    auto_hyphenation.set(qn("w:val"), "true" if profile_value("automatic_hyphenation") else "false")
 
     normal = document.styles["Normal"]
     configure_style(
@@ -377,15 +513,24 @@ def configure_document(document: Document, page_start: int) -> None:
     set_outline_level(structural_heading, 0)
     configure_heading_numbering(document)
 
+    for style_name in ("Heading 1", "Heading 2", "Heading 3", "Report Structural Heading"):
+        ppr = document.styles[style_name]._element.get_or_add_pPr()
+        suppress = ppr.find(qn("w:suppressAutoHyphens"))
+        if suppress is None:
+            suppress = OxmlElement("w:suppressAutoHyphens")
+            ppr.append(suppress)
+        suppress.set(qn("w:val"), "true")
+
     configure_style(
         ensure_style(document, "Report Caption"), size=14,
         align=WD_ALIGN_PARAGRAPH.CENTER, first_indent_cm=0,
-        line_spacing=1.5, before=0, after=0, keep_next=False,
+        line_spacing=float(profile_value("caption_line_spacing")), before=0, after=0, keep_next=False,
     )
     configure_style(
         ensure_style(document, "Report Table Caption"), size=14,
-        align=WD_ALIGN_PARAGRAPH.CENTER, first_indent_cm=0,
-        line_spacing=1.5, before=0, after=0, keep_next=True,
+        align=(WD_ALIGN_PARAGRAPH.LEFT if profile_value("table_caption_alignment") == "left" else WD_ALIGN_PARAGRAPH.CENTER),
+        first_indent_cm=0,
+        line_spacing=float(profile_value("caption_line_spacing")), before=0, after=0, keep_next=True,
     )
     configure_style(
         ensure_style(document, "Report Code Fragment"), font="Courier New", size=12,
@@ -447,7 +592,10 @@ def configure_document(document: Document, page_start: int) -> None:
             line_spacing=1.5,
         )
 
-    toc_left_indents_cm = {1: 0.0, 2: 1.25, 3: 2.5}
+    if profile_value("dash_bullet_lists"):
+        configure_dash_bullet_numbering(document)
+
+    toc_left_indents_cm = profile_value("toc_indents_cm")
     for level in range(1, 4):
         name = f"TOC {level}"
         configure_style(
@@ -593,7 +741,7 @@ def add_cover(document: Document, spec: dict[str, Any]) -> None:
         paragraph.paragraph_format.first_line_indent = Cm(0)
         paragraph.paragraph_format.line_spacing = 1.0
         paragraph.paragraph_format.space_after = Pt(after)
-        paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(MAX_CONTENT_WIDTH_CM), WD_TAB_ALIGNMENT.RIGHT)
+        paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(content_width_cm()), WD_TAB_ALIGNMENT.RIGHT)
         if left:
             run = paragraph.add_run(left)
             set_run_font(run, "Times New Roman", 14)
@@ -615,7 +763,7 @@ def add_cover(document: Document, spec: dict[str, Any]) -> None:
         paragraph.paragraph_format.first_line_indent = Cm(0)
         paragraph.paragraph_format.line_spacing = 1.0
         paragraph.paragraph_format.space_after = Pt(after)
-        paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(MAX_CONTENT_WIDTH_CM), WD_TAB_ALIGNMENT.RIGHT)
+        paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(content_width_cm()), WD_TAB_ALIGNMENT.RIGHT)
         if left:
             set_run_font(paragraph.add_run(left), "Times New Roman", 14)
         if right:
@@ -630,7 +778,8 @@ def add_cover(document: Document, spec: dict[str, Any]) -> None:
 
 
 def add_toc(document: Document, levels: int) -> None:
-    heading = document.add_paragraph("Содержание", style="Report Structural Heading")
+    title = "СОДЕРЖАНИЕ" if profile_value("uppercase_structural") else "Содержание"
+    heading = document.add_paragraph(title, style="Report Structural Heading")
     heading.paragraph_format.page_break_before = True
     heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
     heading.paragraph_format.first_line_indent = Cm(0)
@@ -670,7 +819,7 @@ def add_heading(document: Document, block: dict[str, Any]) -> None:
     level = int(block.get("level", 1))
     if level not in (1, 2, 3):
         raise SpecError(f"Heading level must be 1, 2, or 3: {level}")
-    text = clean_text(block.get("text"), field="heading").replace("—", "–")
+    text = normalize_report_text(clean_text(block.get("text"), field="heading"))
     if MANUAL_HEADING_NUMBER.match(text):
         raise SpecError(
             f"Heading text must not contain a manually typed number; Word numbers headings automatically: {text!r}"
@@ -682,6 +831,8 @@ def add_heading(document: Document, block: dict[str, Any]) -> None:
             r"^(?:СОДЕРЖАНИЕ|ВВЕДЕНИЕ|ЗАКЛЮЧЕНИЕ|ВЫВОДЫ|СПИСОК|ПРИЛОЖЕНИЕ)", text, re.I
         ))
     style = "Report Structural Heading" if structural else f"Heading {level}"
+    if structural and profile_value("uppercase_structural"):
+        text = text.upper()
     paragraph = document.add_paragraph(text, style=style)
     if "page_break_before" in block:
         page_break_before = bool(block["page_break_before"])
@@ -738,6 +889,57 @@ def add_paragraph_block(document: Document, block: dict[str, Any]) -> None:
     keep_paragraph_lines(paragraph)
 
 
+def add_note(document: Document, block: dict[str, Any]) -> None:
+    """Add one or several GOST-style notes without imitating Word footnotes."""
+    items = block.get("items")
+    if items is None:
+        text = normalize_report_text(clean_text(block.get("text", ""), field="note"))
+        if not text:
+            raise SpecError("note requires text or a non-empty items list")
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.first_line_indent = Cm(1.25)
+        prefix = paragraph.add_run("Примечание – ")
+        set_run_font(prefix, "Times New Roman", 14)
+        add_report_text(paragraph, text)
+        keep_paragraph_lines(paragraph)
+        return
+    if not isinstance(items, list) or not items:
+        raise SpecError("note items must be a non-empty list")
+    heading = document.add_paragraph("Примечания")
+    heading.paragraph_format.first_line_indent = Cm(1.25)
+    for run in heading.runs:
+        set_run_font(run, "Times New Roman", 14)
+    for index, item in enumerate(items, 1):
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.left_indent = Cm(1.25)
+        paragraph.paragraph_format.first_line_indent = Cm(-1.25)
+        set_run_font(paragraph.add_run(f"{index} "), "Times New Roman", 14)
+        add_report_text(paragraph, clean_text(item, field=f"note item {index}"))
+        keep_paragraph_lines(paragraph)
+
+
+def add_abbreviations(document: Document, block: dict[str, Any]) -> None:
+    items = block.get("items")
+    if not isinstance(items, list) or not items:
+        raise SpecError("abbreviations requires a non-empty items list")
+    title = "ПЕРЕЧЕНЬ СОКРАЩЕНИЙ И ОБОЗНАЧЕНИЙ" if profile_value("uppercase_structural") else "Перечень сокращений и обозначений"
+    heading = document.add_paragraph(title, style="Report Structural Heading")
+    heading.paragraph_format.page_break_before = True
+    heading.paragraph_format.first_line_indent = Cm(0)
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise SpecError(f"abbreviations item {index} must be an object")
+        term = clean_text(item.get("term"), field=f"abbreviations[{index}].term")
+        definition = clean_text(item.get("definition"), field=f"abbreviations[{index}].definition")
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(4.0), WD_TAB_ALIGNMENT.LEFT)
+        set_run_font(paragraph.add_run(term), "Times New Roman", 14)
+        set_run_font(paragraph.add_run("\t"), "Times New Roman", 14)
+        add_report_text(paragraph, definition)
+        keep_paragraph_lines(paragraph)
+
+
 def add_list(document: Document, block: dict[str, Any], numbered: bool) -> None:
     style = "List Number" if numbered else "List Bullet"
     items = block.get("items")
@@ -754,8 +956,8 @@ def add_figure(document: Document, block: dict[str, Any]) -> None:
     if not path.is_file():
         raise SpecError(f"Figure does not exist: {path}")
     width = float(block.get("width_cm", 14.5))
-    if width <= 0 or width > MAX_CONTENT_WIDTH_CM:
-        raise SpecError(f"Figure width must be within 0..{MAX_CONTENT_WIDTH_CM} cm")
+    if width <= 0 or width > content_width_cm():
+        raise SpecError(f"Figure width must be within 0..{content_width_cm()} cm")
     keep_previous_reference(document)
     paragraph = document.add_paragraph()
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -772,7 +974,7 @@ def add_figure(document: Document, block: dict[str, Any]) -> None:
     number = clean_text(block.get("number", ""), field="figure number")
     if not number:
         raise SpecError("figure requires a number")
-    caption = clean_text(block.get("caption", ""), field="figure caption").replace("—", "–")
+    caption = normalize_report_text(clean_text(block.get("caption", ""), field="figure caption"))
     if not caption:
         raise SpecError("figure requires a caption")
     if caption.endswith("."):
@@ -806,8 +1008,8 @@ def add_figure_placeholder(document: Document, block: dict[str, Any]) -> None:
         raise SpecError("figure_placeholder requires number and caption")
     width = float(block.get("width_cm", 15.5))
     height = float(block.get("height_cm", 6.0))
-    if width <= 0 or width > MAX_CONTENT_WIDTH_CM:
-        raise SpecError(f"Figure placeholder width must be within 0..{MAX_CONTENT_WIDTH_CM} cm")
+    if width <= 0 or width > content_width_cm():
+        raise SpecError(f"Figure placeholder width must be within 0..{content_width_cm()} cm")
     if height < 3.0 or height > 18.0:
         raise SpecError("Figure placeholder height must be within 3..18 cm")
     keep_previous_reference(document)
@@ -924,7 +1126,7 @@ def choose_widths(headers: list[Any], rows: list[list[Any]]) -> list[float]:
         values = [str(headers[index])] + [str(row[index]) if index < len(row) else "" for row in rows]
         weights.append(max(4, min(40, max(map(len, values), default=4))))
     total = sum(weights)
-    return [MAX_CONTENT_WIDTH_CM * weight / total for weight in weights]
+    return [content_width_cm() * weight / total for weight in weights]
 
 
 def add_table_part(
@@ -998,12 +1200,12 @@ def add_table_part(
                     else WD_ALIGN_PARAGRAPH.LEFT
                 )
             paragraph.paragraph_format.first_line_indent = Cm(0)
-            paragraph.paragraph_format.line_spacing = line_spacing if compact_cell else 1.5
+            paragraph.paragraph_format.line_spacing = line_spacing
             paragraph.paragraph_format.space_before = Pt(0)
             paragraph.paragraph_format.space_after = Pt(0)
             run = paragraph.add_run(clean_text(value, field=f"table cell {row_index},{index}"))
-            run_font = font_family if compact_cell else "Times New Roman"
-            run_size = font_size if compact_cell else 14
+            run_font = font_family
+            run_size = font_size
             set_run_font(run, run_font, run_size, bold=(row_index == 0))
 
     if keep_together and len(table.rows) > 1:
@@ -1028,8 +1230,8 @@ def add_table(document: Document, block: dict[str, Any]) -> None:
     if any(not isinstance(row, list) or len(row) != len(headers) for row in rows):
         raise SpecError("every table row must have the same number of cells as headers")
     widths = [float(value) for value in (block.get("widths_cm") or choose_widths(headers, rows))]
-    if len(widths) != len(headers) or sum(widths) > MAX_CONTENT_WIDTH_CM + 0.01:
-        raise SpecError(f"table widths must match columns and total at most {MAX_CONTENT_WIDTH_CM} cm")
+    if len(widths) != len(headers) or sum(widths) > content_width_cm() + 0.01:
+        raise SpecError(f"table widths must match columns and total at most {content_width_cm()} cm")
     for header, width in zip(headers, widths):
         if str(header).strip() == "Итер." and width < 1.8:
             raise SpecError("the `Итер.` column must be at least 1.8 cm at Times New Roman 14 pt")
@@ -1042,13 +1244,15 @@ def add_table(document: Document, block: dict[str, Any]) -> None:
         ):
             raise SpecError("column_alignments must match columns and use left, center, or right")
     long_token_mode = bool(block.get("long_token_mode", False))
-    font_size = float(block.get("font_size", 14))
+    expected_font_size = float(profile_value("table_font_size"))
+    expected_line_spacing = float(profile_value("table_line_spacing"))
+    font_size = float(block.get("font_size", expected_font_size))
     font_family = str(block.get("font_family", "Times New Roman"))
-    line_spacing = float(block.get("line_spacing", 1.5))
-    if font_size != 14.0 or font_family != "Times New Roman" or line_spacing != 1.5:
+    line_spacing = float(block.get("line_spacing", expected_line_spacing))
+    if font_size != expected_font_size or font_family != "Times New Roman" or line_spacing != expected_line_spacing:
         raise SpecError(
-            "report tables must use Times New Roman 14 pt with 1.5 line spacing; "
-            "fit long tokens by column structure and natural Word wrapping in portrait pages"
+            f"profile {ACTIVE_FORMAT_PROFILE_NAME} requires report tables to use "
+            f"Times New Roman {expected_font_size:g} pt with {expected_line_spacing:g} line spacing"
         )
     no_wrap_raw = block.get("no_wrap_columns", [])
     if not isinstance(no_wrap_raw, list) or any(not isinstance(value, int) for value in no_wrap_raw):
@@ -1065,18 +1269,24 @@ def add_table(document: Document, block: dict[str, Any]) -> None:
     number = clean_text(block.get("number", ""), field="table number")
     if not number:
         raise SpecError("table requires a number")
-    caption = clean_text(block.get("caption", ""), field="table caption").replace("—", "–")
+    caption = normalize_report_text(clean_text(block.get("caption", ""), field="table caption"))
     if not caption:
         raise SpecError("table requires a caption")
     if caption.endswith("."):
         raise SpecError("table caption must not end with a period")
 
     rows_per_page_raw = block.get("rows_per_page")
-    if rows_per_page_raw not in (None, ""):
+    if rows_per_page_raw not in (None, "") and not profile_value("manual_table_continuations"):
         raise SpecError(
             "rows_per_page is disabled: keep one native Word table and use repeated headers"
         )
-    parts = [rows]
+    if rows_per_page_raw not in (None, ""):
+        rows_per_page = int(rows_per_page_raw)
+        if rows_per_page < 1:
+            raise SpecError("rows_per_page must be a positive integer")
+        parts = [rows[index:index + rows_per_page] for index in range(0, len(rows), rows_per_page)] or [[]]
+    else:
+        parts = [rows]
 
     keep_together_raw = block.get("keep_together")
     if bool(keep_together_raw):
@@ -1087,7 +1297,11 @@ def add_table(document: Document, block: dict[str, Any]) -> None:
 
     use_final_label = bool(block.get("use_final_label", False))
     if use_final_label:
-        raise SpecError("use_final_label is disabled for native Word table pagination")
+        raise SpecError(
+            "use_final_label is disabled in every profile: student_default uses native Word "
+            "pagination without manual continuations, and SPbPU tr23-26 requires "
+            "'Продолжение таблицы N' above every continuation part, including the last one"
+        )
 
     keep_previous_reference(document)
     for part_index, part_rows in enumerate(parts):
@@ -1149,10 +1363,10 @@ def add_equation(document: Document, block: dict[str, Any]) -> None:
     if number:
         paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
         paragraph.paragraph_format.tab_stops.add_tab_stop(
-            Cm(MAX_CONTENT_WIDTH_CM / 2), WD_TAB_ALIGNMENT.CENTER
+            Cm(content_width_cm() / 2), WD_TAB_ALIGNMENT.CENTER
         )
         paragraph.paragraph_format.tab_stops.add_tab_stop(
-            Cm(MAX_CONTENT_WIDTH_CM), WD_TAB_ALIGNMENT.RIGHT
+            Cm(content_width_cm()), WD_TAB_ALIGNMENT.RIGHT
         )
         paragraph.add_run().add_tab()
     latex = str(block.get("latex", "")).strip()
@@ -1257,7 +1471,7 @@ def add_code(document: Document, block: dict[str, Any]) -> None:
         tbl_pr.append(descriptor)
         set_row_cant_split(table.rows[0])
         cell = table.cell(0, 0)
-        set_cell_width(cell, MAX_CONTENT_WIDTH_CM)
+        set_cell_width(cell, content_width_cm())
         set_cell_margins(cell, top=70, start=100, bottom=70, end=100)
         for index, line in enumerate(lines):
             paragraph = cell.paragraphs[0] if index == 0 else cell.add_paragraph()
@@ -1301,18 +1515,27 @@ def add_code(document: Document, block: dict[str, Any]) -> None:
 def add_appendix_heading(document: Document, block: dict[str, Any]) -> None:
     letter = clean_text(block.get("letter"), field="appendix letter").upper()
     title = clean_text(block.get("title", ""), field="appendix title")
-    paragraph = document.add_paragraph(f"Приложение {letter}", style="Report Structural Heading")
+    forbidden_letters = {"Ё", "З", "Й", "О", "Ч", "Ь", "Ы", "Ъ"}
+    if profile_value("strict_appendices") and letter in forbidden_letters:
+        raise SpecError(f"appendix letter {letter!r} is not permitted by profile {ACTIVE_FORMAT_PROFILE_NAME}")
+    prefix = "ПРИЛОЖЕНИЕ" if profile_value("strict_appendices") else "Приложение"
+    paragraph = document.add_paragraph(f"{prefix} {letter}", style="Report Structural Heading")
     paragraph.paragraph_format.page_break_before = True
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     paragraph.paragraph_format.first_line_indent = Cm(0)
     if title:
-        # Inherit the justified body alignment; a short single-line title
-        # still renders flush left because it is the paragraph's last line.
-        document.add_paragraph(title, style="Normal")
+        title_paragraph = document.add_paragraph(title, style="Normal")
+        if profile_value("strict_appendices"):
+            title_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            title_paragraph.paragraph_format.first_line_indent = Cm(0)
+            for run in title_paragraph.runs:
+                set_run_font(run, "Times New Roman", 14, bold=True)
 
 
 def add_bibliography(document: Document, block: dict[str, Any]) -> None:
     title = clean_text(block.get("title", "Список использованных источников"), field="bibliography title")
+    if profile_value("uppercase_structural"):
+        title = title.upper()
     heading = document.add_paragraph(title, style="Report Structural Heading")
     heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
     heading.paragraph_format.first_line_indent = Cm(0)
@@ -1345,7 +1568,10 @@ def add_bibliography(document: Document, block: dict[str, Any]) -> None:
         bookmark_start.set(qn("w:id"), str(50000 + index))
         bookmark_start.set(qn("w:name"), f"_ReportBib{index}")
         paragraph._p.insert(1 if paragraph._p.pPr is not None else 0, bookmark_start)
-        prefix = paragraph.add_run(f"{index}. {citation}. URL: ")
+        # SPbPU tr23-26 2.9.2 numbers sources with Arabic numerals without a
+        # trailing period; the confirmed student profile keeps `1. `.
+        source_prefix = f"{index} " if profile_value("uppercase_structural") else f"{index}. "
+        prefix = paragraph.add_run(f"{source_prefix}{citation}. URL: ")
         set_run_font(prefix, "Times New Roman", 14)
         add_external_hyperlink(paragraph, url, url)
         suffix = paragraph.add_run(f" (дата обращения: {accessed}).")
@@ -1359,6 +1585,8 @@ def add_content(document: Document, blocks: Iterable[dict[str, Any]]) -> None:
     handlers = {
         "heading": add_heading,
         "paragraph": add_paragraph_block,
+        "note": add_note,
+        "abbreviations": add_abbreviations,
         "bullet_list": lambda doc, block: add_list(doc, block, False),
         "numbered_list": lambda doc, block: add_list(doc, block, True),
         "figure": add_figure,
@@ -1392,6 +1620,11 @@ def validate_spec(spec: dict[str, Any]) -> None:
     document_settings = spec.get("document") or {}
     if not isinstance(document_settings, dict):
         raise SpecError("document must be an object")
+    format_profile = str(document_settings.get("format_profile", "spbpu")).strip()
+    if format_profile not in FORMAT_PROFILES:
+        raise SpecError(
+            "document.format_profile must be one of: " + ", ".join(sorted(FORMAT_PROFILES))
+        )
     code_change = document_settings.get("code_change")
     if code_change is not None:
         if not isinstance(code_change, dict):
@@ -1564,17 +1797,23 @@ def merge_metadata_sources(
 
 
 def build(spec: dict[str, Any], output: Path) -> None:
+    global ACTIVE_FORMAT_PROFILE_NAME, ACTIVE_FORMAT_PROFILE
     validate_spec(spec)
-    document = Document()
     settings = spec.get("document") or {}
-    configure_document(document, int(settings.get("page_number_start", 0)))
+    ACTIVE_FORMAT_PROFILE_NAME = str(settings.get("format_profile", "spbpu")).strip()
+    ACTIVE_FORMAT_PROFILE = FORMAT_PROFILES[ACTIVE_FORMAT_PROFILE_NAME]
+    document = Document()
+    configure_document(
+        document,
+        int(settings.get("page_number_start", profile_value("page_number_start"))),
+    )
 
     properties = document.core_properties
     properties.title = required(spec["metadata"], "title")
     properties.subject = str(settings.get("subject", "Учебный отчёт"))
     properties.author = str(settings.get("author", ""))
     properties.last_modified_by = ""
-    properties.keywords = ""
+    properties.keywords = f"academic-report-format-profile:{ACTIVE_FORMAT_PROFILE_NAME}"
     properties.comments = ""
 
     add_cover(document, spec)
