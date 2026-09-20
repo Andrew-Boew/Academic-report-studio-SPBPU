@@ -112,20 +112,19 @@ def inspect(path: Path) -> dict[str, Any]:
 
     keywords = document.core_properties.keywords or ""
     marker = "academic-report-format-profile:"
-    format_profile = keywords.split(marker, 1)[1].split()[0].strip() if marker in keywords else "spbpu"
-    if format_profile not in {"student_default", "spbpu"}:
+    format_profile = keywords.split(marker, 1)[1].split()[0].strip() if marker in keywords else "unified"
+    format_profile = {"spbpu": "unified", "student_default": "unified"}.get(format_profile, format_profile)
+    if format_profile != "unified":
         errors.append(f"Неизвестный профиль оформления в свойствах DOCX: {format_profile}")
-        format_profile = "spbpu"
-    strict_spbpu = format_profile == "spbpu"
-    expected_right_margin = 1.0 if strict_spbpu else 1.5
-    expected_page_start = "1" if strict_spbpu else "0"
-    expected_caption_spacing = 1.0 if strict_spbpu else 1.5
-    expected_toc_indents = (
-        {"TOC 1": 0.0, "TOC 2": 0.5, "TOC 3": 1.0}
-        if strict_spbpu else
-        {"TOC 1": 0.0, "TOC 2": 1.25, "TOC 3": 2.5}
-    )
-    expected_table_size_pt = 12.0 if strict_spbpu else 14.0
+        format_profile = "unified"
+    # The unified body profile (GOST 7.32-2017 / SPbPU tr23-26) applies to every
+    # work type; the legacy spbpu values below are therefore always expected.
+    strict_spbpu = True
+    expected_right_margin = 1.5
+    expected_page_start = "1"
+    expected_caption_spacing = 1.0
+    expected_toc_indents = {"TOC 1": 0.0, "TOC 2": 0.5, "TOC 3": 1.0}
+    expected_table_size_pt = 12.0
 
     if not document.sections:
         errors.append("В документе отсутствуют секции")
@@ -159,9 +158,29 @@ def inspect(path: Path) -> dict[str, Any]:
         errors.append(
             f"Профиль {format_profile}: начальное значение счётчика страниц должно быть {expected_page_start}"
         )
-    footer_paragraphs = first_section.footer.paragraphs
-    if not footer_paragraphs or effective_alignment(footer_paragraphs[0]) != WD_ALIGN_PARAGRAPH.CENTER:
+    page_footer_found = False
+    page_footer_centered = False
+    for section in document.sections:
+        for footer_paragraph in section.footer.paragraphs:
+            if footer_paragraph._p.xpath(".//w:instrText[contains(., 'PAGE')]"):
+                page_footer_found = True
+                if effective_alignment(footer_paragraph) == WD_ALIGN_PARAGRAPH.CENTER:
+                    page_footer_centered = True
+    if not page_footer_found:
+        errors.append("Поле номера страницы PAGE не найдено в нижнем колонтитуле тела отчёта")
+    elif not page_footer_centered:
         errors.append("Номер страницы должен располагаться по центру нижнего колонтитула")
+    if any(
+        paragraph._p.xpath(".//w:instrText[contains(., 'PAGE')]")
+        for paragraph in first_section.footer.paragraphs
+    ) or any(
+        paragraph._p.xpath(".//w:instrText[contains(., 'PAGE')]")
+        for paragraph in first_section.first_page_footer.paragraphs
+    ):
+        errors.append(
+            "Титульный лист, задание, реферат и перечень сокращений считаются, "
+            "но номер страницы на них не печатается (tr23-26 3.4.2)"
+        )
 
     normal = document.styles["Normal"]
     font_name = style_font_name(normal)
@@ -177,7 +196,7 @@ def inspect(path: Path) -> dict[str, Any]:
     if not isinstance(spacing, float) or not near(spacing, 1.5, 0.01):
         errors.append("Стиль Normal: межстрочный интервал должен быть 1,5")
 
-    expected_heading_sizes = {"Heading 1": 16.0, "Heading 2": 14.0, "Heading 3": 14.0}
+    expected_heading_sizes = {"Heading 1": 14.0, "Heading 2": 14.0, "Heading 3": 14.0}
     for name in ("Heading 1", "Heading 2", "Heading 3"):
         style = document.styles[name]
         expected_size = expected_heading_sizes[name]
@@ -280,14 +299,33 @@ def inspect(path: Path) -> dict[str, Any]:
                 errors.append(f"Стиль {name}: интервал после должен быть 0 pt")
 
     first_page_text = "\n".join(p.text for p in document.paragraphs[:35])
-    report_type = "course" if re.search(r"КУРСОВАЯ\s+РАБОТА", first_page_text, re.I) else "lab"
+    category = (document.core_properties.category or "").strip()
+    category_match = re.match(r"^(lab|course)\s+(lab|course|vkr_2026|vkr_tr23|nir)$", category)
+    if category_match:
+        report_type = category_match.group(1)
+        cover_layout = category_match.group(2)
+    else:
+        if re.search(r"ВЫПУСКНА\s+КВАЛИФИКАЦИОННА\s+РАБОТА", first_page_text, re.I):
+            cover_layout = "vkr_2026"
+        elif re.search(r"О\s+НАУЧНО-ИССЛЕДОВАТЕЛЬСКО\s+РАБОТЕ", first_page_text, re.I):
+            cover_layout = "nir"
+        else:
+            cover_layout = "course" if re.search(r"КУРСОВАЯ\s+РАБОТА", first_page_text, re.I) else "lab"
+        report_type = "lab" if cover_layout == "lab" else "course"
     if "политехнический университет" not in first_page_text.lower():
         errors.append("Не найден обязательный титульный блок университета")
-    if not re.search(r"ЛАБОРАТОРНАЯ\s+РАБОТА|КУРСОВАЯ\s+РАБОТА", first_page_text, re.I):
-        errors.append("На титульном листе не указан тип учебной работы")
+    expected_label = {
+        "lab": r"ЛАБОРАТОРНАЯ\s+РАБОТА",
+        "course": r"КУРСОВАЯ\s+РАБОТА",
+        "vkr_2026": r"ВЫПУСКНАЯ\s+КВАЛИФИКАЦИОННАЯ\s+РАБОТА",
+        "vkr_tr23": r"ВЫПУСКНАЯ\s+КВАЛИФИКАЦИОННАЯ\s+РАБОТА",
+        "nir": r"О\s+НАУЧНО-ИССЛЕДОВАТЕЛЬСКОЙ\s+РАБОТЕ",
+    }[cover_layout]
+    if not re.search(expected_label, first_page_text, re.I):
+        errors.append("На титульном листе не указан тип работы по выбранному титульному макету")
     work_label_paragraphs = [
         p for p in document.paragraphs
-        if re.search(r"ЛАБОРАТОРНАЯ\s+РАБОТА|КУРСОВАЯ\s+РАБОТА", p.text, re.I)
+        if re.search(expected_label, p.text, re.I)
     ]
     if work_label_paragraphs:
         runs = [run for run in work_label_paragraphs[0].runs if run.text.strip()]
@@ -295,15 +333,16 @@ def inspect(path: Path) -> dict[str, Any]:
             errors.append("Тип работы на титульном листе должен иметь размер 14 pt")
         if any(run.font.bold is not True for run in runs):
             errors.append("Тип работы на титульном листе должен быть полужирным")
-    signature_paragraphs = [p for p in document.paragraphs[:35] if p.text.strip() == "<подпись>"]
-    if len(signature_paragraphs) != 2:
-        errors.append("На титульном листе должны быть две строки <подпись>: для студента и проверяющего")
-    for paragraph in signature_paragraphs:
-        if effective_alignment(paragraph) != WD_ALIGN_PARAGRAPH.CENTER:
-            errors.append("Строка <подпись> должна быть выровнена по центру")
-        runs = [run for run in paragraph.runs if run.text.strip()]
-        if any(run.font.size is None or not near(run.font.size.pt, 12.0, 0.1) or run.font.italic is not True for run in runs):
-            errors.append("Строка <подпись> должна быть Times New Roman 12 pt курсивом")
+    if cover_layout in {"lab", "course"}:
+        signature_paragraphs = [p for p in document.paragraphs[:35] if p.text.strip() == "<подпись>"]
+        if len(signature_paragraphs) != 2:
+            errors.append("На титульном листе должны быть две строки <подпись>: для студента и проверяющего")
+        for paragraph in signature_paragraphs:
+            if effective_alignment(paragraph) != WD_ALIGN_PARAGRAPH.CENTER:
+                errors.append("Строка <подпись> должна быть выровнена по центру")
+            runs = [run for run in paragraph.runs if run.text.strip()]
+            if any(run.font.size is None or not near(run.font.size.pt, 12.0, 0.1) or run.font.italic is not True for run in runs):
+                errors.append("Строка <подпись> должна быть Times New Roman 12 pt курсивом")
 
     all_text = "\n".join(p.text for p in document.paragraphs)
     for table in document.tables:
@@ -312,6 +351,8 @@ def inspect(path: Path) -> dict[str, Any]:
                 all_text += "\n" + cell.text
     if PLACEHOLDER.search(all_text):
         errors.append("В документе остались служебные заполнители")
+    if re.search(r"\d[ \u00a0]+°", all_text):
+        errors.append("Перед поднятым знаком градуса ° не должно быть пробела: 120° (tr23-26 3.10.1)")
 
     with zipfile.ZipFile(path) as archive:
         document_xml = archive.read("word/document.xml")
@@ -319,6 +360,16 @@ def inspect(path: Path) -> dict[str, Any]:
         footer_xml = b"".join(
             archive.read(name) for name in archive.namelist() if name.startswith("word/footer") and name.endswith(".xml")
         )
+        names = archive.namelist()
+        footnotes_xml = archive.read("word/footnotes.xml") if "word/footnotes.xml" in names else b""
+    referenced_footnotes = set(re.findall(rb'footnoteReference[^>]*w:id="(\d+)"', document_xml))
+    defined_footnotes = set(re.findall(rb'<w:footnote[^>]*w:id="(-?\d+)"', footnotes_xml))
+    if referenced_footnotes and not footnotes_xml:
+        errors.append("В тексте есть сноски, но часть word/footnotes.xml отсутствует")
+    if referenced_footnotes - defined_footnotes:
+        errors.append("Сноска в тексте ссылается на отсутствующую запись footnotes.xml")
+    if footnotes_xml and not referenced_footnotes:
+        warnings.append("Часть footnotes.xml есть, но в тексте нет ни одной ссылки на сноску")
     has_toc = b"TOC " in document_xml
     if not has_toc:
         warnings.append("Поле содержания TOC не найдено")
@@ -380,9 +431,9 @@ def inspect(path: Path) -> dict[str, Any]:
         if not tabs:
             errors.append(f"Строка содержания не имеет правой табуляции с точечным заполнителем: {paragraph.text!r}")
             continue
-        expected_toc_tab_pos = "9638" if strict_spbpu else "9354"
+        expected_toc_tab_pos = "9354"
         if tabs[0].get(qn("w:pos")) != expected_toc_tab_pos:
-            expected_width_label = "17,0 см" if strict_spbpu else "16,5 см"
+            expected_width_label = "16,5 см"
             errors.append(
                 f"Правый табулятор содержания должен находиться на рабочей ширине {expected_width_label} "
                 f"(позиция {expected_toc_tab_pos} twips)"
@@ -442,6 +493,10 @@ def inspect(path: Path) -> dict[str, Any]:
         if paragraph.style.name.startswith("Heading "):
             if MANUAL_HEADING_NUMBER.match(value):
                 errors.append(f"Номер главы набран вручную вместо функции нумерации Word: {value!r}")
+            if paragraph.style.name == "Heading 1" and not paragraph._p.xpath("./w:pPr/w:pageBreakBefore"):
+                errors.append(
+                    f"Каждый раздел основной части должен начинаться с новой страницы: {value!r}"
+                )
             direct_left = paragraph.paragraph_format.left_indent
             direct_first = paragraph.paragraph_format.first_line_indent
             left_cm = direct_left.cm if direct_left is not None else 0.0
@@ -458,6 +513,39 @@ def inspect(path: Path) -> dict[str, Any]:
         elif words and len(words) >= 2 and all(word.isupper() for word in words):
             errors.append(f"Заголовок должен быть в регистре предложения, а не прописными: {value!r}")
 
+    abstract_heading_present = any(
+        paragraph.style and paragraph.style.name == "Report Structural Heading"
+        and paragraph.text.strip().upper() == "РЕФЕРАТ"
+        for paragraph in document.paragraphs
+    )
+    if abstract_heading_present:
+        keywords_line = next(
+            (p.text for p in document.paragraphs if p.text.strip().upper().startswith("КЛЮЧЕВЫЕ СЛОВА")),
+            "",
+        )
+        keyword_words = [
+            word.strip() for word in keywords_line.split(":", 1)[-1].split(",") if word.strip()
+        ] if keywords_line else []
+        if not (5 <= len(keyword_words) <= 15):
+            errors.append("РЕФЕРАТ: ключевых слов должно быть от 5 до 15 (tr23-26 2.3.2)")
+        if not any(
+            paragraph.style and paragraph.style.name == "Report Structural Heading"
+            and paragraph.text.strip().upper() == "ABSTRACT"
+            for paragraph in document.paragraphs
+        ):
+            errors.append("РЕФЕРАТ должен сопровождаться английской версией ABSTRACT (tr23-26 2.3.4)")
+        if "Работа содержит" not in all_text:
+            errors.append("РЕФЕРАТ должен начинаться со сведений об объёме работы («Работа содержит: …»)")
+    abbreviations_present = any(
+        paragraph.text.strip().upper() == "ПЕРЕЧЕНЬ СОКРАЩЕНИЙ И ОБОЗНАЧЕНИЙ"
+        for paragraph in document.paragraphs
+    )
+    if abbreviations_present and "В настоящей работе применяют" not in all_text:
+        errors.append(
+            "Перечень сокращений должен начинаться со слов «В настоящей работе применяют "
+            "следующие сокращения и обозначения» (tr23-26 2.4.1)"
+        )
+
     appendix_indices = [i for i, text in enumerate(heading_texts) if text.upper().startswith("ПРИЛОЖЕНИЕ")]
     source_indices = [i for i, text in enumerate(heading_texts) if "ИСТОЧНИК" in text.upper() or "ЛИТЕРАТУР" in text.upper()]
     if appendix_indices and source_indices and min(appendix_indices) < max(source_indices):
@@ -467,9 +555,9 @@ def inspect(path: Path) -> dict[str, Any]:
         paragraph for paragraph in document.paragraphs
         if paragraph.style and paragraph.style.name == "Report Bibliography"
     ]
-    if report_type == "course" and not bibliography_paragraphs:
-        errors.append("Курсовая работа должна содержать список проверенных реальных источников")
-    if report_type == "lab" and bibliography_paragraphs:
+    if cover_layout != "lab" and not bibliography_paragraphs:
+        errors.append("Курсовая работа, ВКР и отчёт по НИР должны содержать список проверенных реальных источников")
+    if cover_layout == "lab" and bibliography_paragraphs:
         errors.append("Лабораторная работа не должна содержать список использованных источников")
     seen_external_links = 0
     for paragraph in document.paragraphs:
@@ -529,9 +617,9 @@ def inspect(path: Path) -> dict[str, Any]:
                 bullet_marker_ok = lvl_text is not None and lvl_text.get(qn("w:val")) == "–"
         if not bullet_marker_ok:
             errors.append(
-                "Профиль spbpu: первый уровень перечисления должен использовать тире (Word-нумерация с маркером «–»)"
+                "Первый уровень перечисления должен использовать тире (Word-нумерация с маркером «–»)"
             )
-    if report_type == "course":
+    if cover_layout != "lab":
         for number in narrative_citations:
             if number < 1 or number > len(bibliography_paragraphs):
                 errors.append(f"Ссылка [{number}] не соответствует элементу списка источников")
@@ -639,8 +727,10 @@ def inspect(path: Path) -> dict[str, Any]:
             effective_before = spacing.space_before or paragraph.style.paragraph_format.space_before
             effective_after = spacing.space_after or paragraph.style.paragraph_format.space_after
             effective_line = spacing.line_spacing or paragraph.style.paragraph_format.line_spacing
-            if effective_before is None or not near(effective_before.pt, 0.0, 0.1):
-                errors.append("Абзац формулы должен иметь интервал перед 0 pt")
+            if effective_before is None or not near(effective_before.pt, 21.0, 0.1):
+                errors.append(
+                    "Абзац формулы должен иметь зазор сверху, эквивалентный одной пустой строке (21 pt)"
+                )
             if effective_after is None or not near(effective_after.pt, 0.0, 0.1):
                 errors.append("Абзац формулы должен иметь интервал после 0 pt")
             if not isinstance(effective_line, float) or not near(effective_line, 1.5, 0.01):

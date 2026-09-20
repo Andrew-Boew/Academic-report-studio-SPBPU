@@ -40,10 +40,9 @@ def structural_heading(block: dict) -> bool:
 
 def collect_entries(spec: dict) -> list[dict]:
     levels = max(1, min(3, int((spec.get("document") or {}).get("toc_levels", 3))))
-    profile_name = str((spec.get("document") or {}).get("format_profile", "spbpu")).strip()
-    # student_default keeps the confirmed `1. Title` display form;
-    # SPbPU tr23-26 requires heading numbers without a trailing period.
-    heading_suffix = "" if profile_name == "spbpu" else "."
+    # The unified body profile (GOST 7.32-2017 / tr23-26) displays heading
+    # numbers without a trailing period.
+    heading_suffix = ""
     entries: list[dict] = []
     counters = [0, 0, 0]
     for block in spec.get("content", []):
@@ -270,18 +269,36 @@ def attach_heading_bookmarks(root: etree._Element, entries: list[dict]) -> None:
         next_id += 1
 
 
+def fill_abstract_volume(root: etree._Element, page_count: int) -> int:
+    """Replace the `__` page-count placeholders in РЕФЕРАТ/ABSTRACT volume lines."""
+    filled = 0
+    for paragraph in root.xpath(".//w:body//w:p", namespaces=NS):
+        text = paragraph_text(paragraph)
+        if not (text.startswith("Работа содержит") or text.startswith("The work contains")):
+            continue
+        if not re.search(r"_{2,}", text):
+            continue
+        for node in paragraph.xpath(".//w:t", namespaces=NS):
+            value = node.text or ""
+            if re.search(r"_{2,}", value):
+                node.text = re.sub(r"_{2,}", str(page_count), value)
+                filled += 1
+    return filled
+
+
 def patch_docx(
     source: Path,
     output: Path,
     entries: list[dict],
     *,
-    format_profile: str = "spbpu",
+    page_count: int,
 ) -> None:
     with zipfile.ZipFile(source) as archive:
         infos = archive.infolist()
         members = {info.filename: archive.read(info.filename) for info in infos}
     root = etree.fromstring(members["word/document.xml"])
     attach_heading_bookmarks(root, entries)
+    filled = fill_abstract_volume(root, page_count)
     candidates = root.xpath(".//w:p[.//w:instrText[contains(., 'TOC')]]", namespaces=NS)
     if not candidates:
         raise ValueError("Word TOC field not found")
@@ -302,9 +319,11 @@ def patch_docx(
         raise ValueError("End of Word TOC field not found")
     for candidate_index in range(end_index, index - 1, -1):
         parent.remove(siblings[candidate_index])
-    strict_spbpu = format_profile == "spbpu"
-    toc_tab_pos = "9638" if strict_spbpu else "9354"
-    toc_left_twips = {1: "0", 2: "284", 3: "567"} if strict_spbpu else {1: "0", 2: "709", 3: "1417"}
+    # The unified body profile uses 16.5 cm of working width (right margin
+    # 1.5 cm): the page-number tab sits at 9354 twips and hierarchy indents
+    # are 0 / 0.5 / 1.0 cm (tr23-26 2.5.1).
+    toc_tab_pos = "9354"
+    toc_left_twips = {1: "0", 2: "284", 3: "567"}
     for offset, entry in enumerate(entries):
         parent.insert(index + offset, entry_paragraph(
             entry,
@@ -352,17 +371,21 @@ def main() -> int:
         raise SystemExit("Use a distinct --output path")
     spec = json.loads(args.spec.read_text(encoding="utf-8"))
     document_settings = spec.get("document") or {}
-    profile_name = str(document_settings.get("format_profile", "spbpu")).strip()
-    default_page_start = 1 if profile_name == "spbpu" else 0
-    page_start = int(document_settings.get("page_number_start", default_page_start))
+    # Continuous physical numbering from the title page: the first visible
+    # number equals the real rendered position of the page.
+    page_start = int(document_settings.get("page_number_start", 1) or 1)
     entries = locate_pages(collect_entries(spec), args.rendered_pdf.expanduser().resolve(), page_start)
     if not entries:
         raise SystemExit("No TOC entries found in the specification")
-    patch_docx(source, output, entries, format_profile=profile_name)
+    page_count = len(PdfReader(str(args.rendered_pdf.expanduser().resolve())).pages)
+    patch_docx(source, output, entries, page_count=page_count)
     if args.entries_json:
         args.entries_json.parent.mkdir(parents=True, exist_ok=True)
-        args.entries_json.write_text(json.dumps({"entries": entries}, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"output": str(output), "entries": entries}, ensure_ascii=False))
+        args.entries_json.write_text(
+            json.dumps({"entries": entries, "page_count": page_count}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    print(json.dumps({"output": str(output), "entries": entries, "page_count": page_count}, ensure_ascii=False))
     return 0
 
 
