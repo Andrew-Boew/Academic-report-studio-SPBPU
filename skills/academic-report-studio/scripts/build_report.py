@@ -30,31 +30,11 @@ from lxml import etree
 
 
 FORMAT_PROFILES: dict[str, dict[str, Any]] = {
-    "student_default": {
+    "unified": {
         "left_margin_cm": 3.0,
         "right_margin_cm": 1.5,
         "top_margin_cm": 2.0,
         "bottom_margin_cm": 2.0,
-        "page_number_start": 0,
-        "heading_labels": ("%1.", "%1.%2.", "%1.%2.%3."),
-        "uppercase_structural": False,
-        "table_caption_alignment": "center",
-        "table_font_size": 14.0,
-        "table_line_spacing": 1.5,
-        "caption_line_spacing": 1.5,
-        "toc_indents_cm": {1: 0.0, 2: 1.25, 3: 2.5},
-        "manual_table_continuations": False,
-        "automatic_hyphenation": False,
-        "strict_units": False,
-        "strict_appendices": False,
-        "dash_bullet_lists": False,
-    },
-    "spbpu": {
-        "left_margin_cm": 3.0,
-        "right_margin_cm": 1.0,
-        "top_margin_cm": 2.0,
-        "bottom_margin_cm": 2.0,
-        "page_number_start": 1,
         "heading_labels": ("%1", "%1.%2", "%1.%2.%3"),
         "uppercase_structural": True,
         "table_caption_alignment": "left",
@@ -69,9 +49,19 @@ FORMAT_PROFILES: dict[str, dict[str, Any]] = {
         "dash_bullet_lists": True,
     },
 }
-ACTIVE_FORMAT_PROFILE_NAME = "spbpu"
-ACTIVE_FORMAT_PROFILE = FORMAT_PROFILES[ACTIVE_FORMAT_PROFILE_NAME]
+# ГОСТ 7.32-2017 and the SPbPU 2023 NIR/VKR manual define ONE body format for
+# every work type (лабораторная, курсовая, ВКР, отчёт по НИР). The work type
+# changes only the title page and the set of structural elements, never the
+# body rules. Historical profile names are accepted and mapped to `unified`.
+LEGACY_FORMAT_PROFILES = {"spbpu": "unified", "student_default": "unified"}
+ACTIVE_FORMAT_PROFILE_NAME = "unified"
+ACTIVE_FORMAT_PROFILE = FORMAT_PROFILES["unified"]
 MAX_CONTENT_WIDTH_CM = 16.5
+# tr23-26 3.3.3/3.6.6/3.7.3 and GOST 7.32-2017 6.8.1 require one free line
+# before headings and around figures, tables and formulas. The gap is set by
+# paragraph properties (never by empty paragraphs): one 14 pt line at 1.5
+# spacing equals 21 pt.
+BLANK_LINE_PT = 21.0
 OMML_NAMESPACES = {"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}
 PLACEHOLDER_PATTERN = re.compile(r"\{\{|\}\}|\b(?:TODO|TBD|FIXME)\b|\[вставить[^\]]*\]", re.I)
 MANUAL_HEADING_NUMBER = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+")
@@ -81,6 +71,7 @@ FIGURE_REFERENCE_PATTERN = re.compile(
     r"(?P<number>(?:[А-ЯЁ]\.)?\d+)",
     re.IGNORECASE,
 )
+FOOTNOTE_PATTERN = re.compile(r"\[\^([^\]\[]+)\]")
 CYRILLIC_BOOKMARK_LETTERS = {
     "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E",
     "Ж": "ZH", "З": "Z", "И": "I", "К": "K", "Л": "L", "М": "M",
@@ -97,24 +88,17 @@ SOURCE_KINDS = {
     "official_web_resource",
     "standard",
 }
-OPENING_PAGE_HEADINGS = {
-    "введение",
-    "цель работы",
-    "задачи",
-}
-DEFAULT_NEW_PAGE_HEADINGS = {
-    "ход работы",
-    "дополнительные задания",
-    "дополнительное задание",
-    "выводы",
-    "заключение",
-}
+FRONT_MATTER_TYPES = {"abstract", "assignment", "abbreviations"}
+COVER_LAYOUTS = {"lab", "course", "vkr_2026", "vkr_tr23", "nir"}
 
 UNIT_PATTERN = re.compile(
-    r"(?<=\d)[ \t]+(?=(?:%|°[CFКС]|мм|см|дм|км|м|мг|г|кг|мл|л|мс|с|мин|ч|"
+    r"(?<=\d)[ \t]+(?=(?:%|мм|см|дм|км|м|мг|г|кг|мл|л|мс|с|мин|ч|"
     r"Гц|кГц|МГц|ГГц|В|кВ|А|мА|Вт|кВт|Па|кПа|МПа|байт|Кбайт|Мбайт|Гбайт)\b)",
     re.IGNORECASE,
 )
+# Signs raised above the line (°, ') follow the number without a space
+# (tr23-26 3.10.1): 120°, 15'.
+DEGREE_SPACE_PATTERN = re.compile(r"(?<=\d)[ \u00a0\t]+(?=°)")
 
 
 def profile_value(name: str) -> Any:
@@ -129,7 +113,107 @@ def normalize_report_text(text: str) -> str:
     text = text.replace("—", "–")
     if profile_value("strict_units"):
         text = UNIT_PATTERN.sub("\u00a0", text)
+        text = DEGREE_SPACE_PATTERN.sub("", text)
     return text
+
+
+_PENDING_OBJECT_GAP = {"active": False}
+
+
+def request_gap_after_object() -> None:
+    """Ask for one blank-line gap above the next body paragraph."""
+    _PENDING_OBJECT_GAP["active"] = True
+
+
+def apply_pending_gap(paragraph_format) -> None:
+    if _PENDING_OBJECT_GAP["active"]:
+        _PENDING_OBJECT_GAP["active"] = False
+        paragraph_format.space_before = Pt(BLANK_LINE_PT)
+
+
+def clear_pending_gap() -> None:
+    _PENDING_OBJECT_GAP["active"] = False
+
+
+_FOOTNOTES: list[str] = []
+
+
+def add_footnote_reference(paragraph, note_text: str) -> None:
+    """Attach a real Microsoft Word footnote to the current position."""
+    _FOOTNOTES.append(normalize_report_text(note_text.strip()))
+    footnote_id = len(_FOOTNOTES) + 1  # ids -1 and 0 are reserved separators
+    run = paragraph.add_run()
+    rpr = run._element.get_or_add_rPr()
+    vert_align = OxmlElement("w:vertAlign")
+    vert_align.set(qn("w:val"), "superscript")
+    rpr.append(vert_align)
+    reference = OxmlElement("w:footnoteReference")
+    reference.set(qn("w:id"), str(footnote_id))
+    run._r.append(reference)
+    set_run_font(run, "Times New Roman", 14)
+
+
+def attach_footnotes(document: Document) -> None:
+    """Create the word/footnotes.xml part with every collected footnote."""
+    if not _FOOTNOTES:
+        return
+    namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    root = etree.Element(f"{{{namespace}}}footnotes", nsmap={"w": namespace})
+    for footnote_type, footnote_id, marker in (
+        ("separator", "-1", "separator"),
+        ("continuationSeparator", "0", "continuationSeparator"),
+    ):
+        footnote = etree.SubElement(root, f"{{{namespace}}}footnote")
+        footnote.set(f"{{{namespace}}}type", footnote_type)
+        footnote.set(f"{{{namespace}}}id", footnote_id)
+        paragraph = etree.SubElement(footnote, f"{{{namespace}}}p")
+        ppr = etree.SubElement(paragraph, f"{{{namespace}}}pPr")
+        spacing = etree.SubElement(ppr, f"{{{namespace}}}spacing")
+        spacing.set(f"{{{namespace}}}after", "0")
+        spacing.set(f"{{{namespace}}}line", "240")
+        spacing.set(f"{{{namespace}}}lineRule", "auto")
+        run = etree.SubElement(paragraph, f"{{{namespace}}}r")
+        etree.SubElement(run, f"{{{namespace}}}{marker}")
+    for index, note_text in enumerate(_FOOTNOTES, start=2):
+        footnote = etree.SubElement(root, f"{{{namespace}}}footnote")
+        footnote.set(f"{{{namespace}}}id", str(index))
+        paragraph = etree.SubElement(footnote, f"{{{namespace}}}p")
+        ppr = etree.SubElement(paragraph, f"{{{namespace}}}pPr")
+        spacing = etree.SubElement(ppr, f"{{{namespace}}}spacing")
+        spacing.set(f"{{{namespace}}}after", "0")
+        spacing.set(f"{{{namespace}}}line", "240")
+        spacing.set(f"{{{namespace}}}lineRule", "auto")
+        indent = etree.SubElement(ppr, f"{{{namespace}}}ind")
+        indent.set(f"{{{namespace}}}firstLine", "0")
+        marker_run = etree.SubElement(paragraph, f"{{{namespace}}}r")
+        marker_rpr = etree.SubElement(marker_run, f"{{{namespace}}}rPr")
+        marker_vert = etree.SubElement(marker_rpr, f"{{{namespace}}}vertAlign")
+        marker_vert.set(f"{{{namespace}}}val", "superscript")
+        etree.SubElement(marker_run, f"{{{namespace}}}footnoteRef")
+        text_run = etree.SubElement(paragraph, f"{{{namespace}}}r")
+        text_rpr = etree.SubElement(text_run, f"{{{namespace}}}rPr")
+        fonts = etree.SubElement(text_rpr, f"{{{namespace}}}rFonts")
+        for key in ("ascii", "hAnsi", "eastAsia", "cs"):
+            fonts.set(f"{{{namespace}}}{key}", "Times New Roman")
+        size = etree.SubElement(text_rpr, f"{{{namespace}}}sz")
+        size.set(f"{{{namespace}}}val", "20")
+        node = etree.SubElement(text_run, f"{{{namespace}}}t")
+        node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        node.text = f" {note_text}"
+    content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"
+    relationship_type = getattr(
+        RT, "FOOTNOTES", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes"
+    )
+    from docx.opc.packuri import PackURI
+    from docx.opc.part import Part
+
+    part = Part(
+        PackURI("/word/footnotes.xml"),
+        content_type,
+        etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True),
+        document.part.package,
+    )
+    document.part.relate_to(part, relationship_type)
 
 
 class SpecError(ValueError):
@@ -245,9 +329,8 @@ def add_bookmark(document: Document, paragraph, name: str) -> None:
     paragraph._p.append(end)
 
 
-def add_report_text(paragraph, text: str) -> None:
-    """Write body text and turn source and figure references into internal links."""
-    text = normalize_report_text(text)
+def _add_linked_text(paragraph, text: str) -> None:
+    """Write one text segment and turn source and figure references into internal links."""
     matches: list[tuple[int, int, str, Any]] = []
     matches.extend((match.start(), match.end(), "source", match) for match in CITATION_PATTERN.finditer(text))
     matches.extend((match.start(), match.end(), "figure", match) for match in FIGURE_REFERENCE_PATTERN.finditer(text))
@@ -268,6 +351,23 @@ def add_report_text(paragraph, text: str) -> None:
     if cursor < len(text):
         run = paragraph.add_run(text[cursor:])
         set_run_font(run, "Times New Roman", 14)
+
+
+def add_report_text(paragraph, text: str) -> None:
+    """Write body text; `[^текст]` markers become real Microsoft Word footnotes."""
+    text = normalize_report_text(text)
+    footnote_matches = list(FOOTNOTE_PATTERN.finditer(text))
+    if not footnote_matches:
+        _add_linked_text(paragraph, text)
+        return
+    cursor = 0
+    for match in footnote_matches:
+        if match.start() > cursor:
+            _add_linked_text(paragraph, text[cursor:match.start()])
+        add_footnote_reference(paragraph, match.group(1))
+        cursor = match.end()
+    if cursor < len(text):
+        _add_linked_text(paragraph, text[cursor:])
 
 
 def configure_style(style, *, font="Times New Roman", size=14, bold=None, italic=None,
@@ -454,6 +554,66 @@ def configure_dash_bullet_numbering(document: Document) -> int:
     return num_id
 
 
+def configure_paren_number_numbering(document: Document) -> int:
+    """Link List Number to a real Word list labelled `1)`, `2)`, ... (tr23-26 3.5.3)."""
+    numbering = document.part.numbering_part.element
+    abstract_ids = [
+        int(node.get(qn("w:abstractNumId"), "0"))
+        for node in numbering.findall(qn("w:abstractNum"))
+    ]
+    num_ids = [
+        int(node.get(qn("w:numId"), "0"))
+        for node in numbering.findall(qn("w:num"))
+    ]
+    abstract_id = max(abstract_ids, default=-1) + 1
+    num_id = max(num_ids, default=0) + 1
+
+    abstract = OxmlElement("w:abstractNum")
+    abstract.set(qn("w:abstractNumId"), str(abstract_id))
+    multi = OxmlElement("w:multiLevelType")
+    multi.set(qn("w:val"), "singleLevel")
+    abstract.append(multi)
+    lvl = OxmlElement("w:lvl")
+    lvl.set(qn("w:ilvl"), "0")
+    start = OxmlElement("w:start")
+    start.set(qn("w:val"), "1")
+    num_fmt = OxmlElement("w:numFmt")
+    num_fmt.set(qn("w:val"), "decimal")
+    lvl_text = OxmlElement("w:lvlText")
+    lvl_text.set(qn("w:val"), "%1)")
+    suffix = OxmlElement("w:suff")
+    suffix.set(qn("w:val"), "space")
+    lvl_jc = OxmlElement("w:lvlJc")
+    lvl_jc.set(qn("w:val"), "left")
+    ppr = OxmlElement("w:pPr")
+    indent = OxmlElement("w:ind")
+    indent.set(qn("w:left"), "1066")
+    indent.set(qn("w:hanging"), "357")
+    ppr.append(indent)
+    rpr = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    for key in ("ascii", "hAnsi", "eastAsia", "cs"):
+        fonts.set(qn(f"w:{key}"), "Times New Roman")
+    rpr.append(fonts)
+    for child in (start, num_fmt, lvl_text, suffix, lvl_jc, ppr, rpr):
+        lvl.append(child)
+    abstract.append(lvl)
+
+    first_num = numbering.find(qn("w:num"))
+    if first_num is None:
+        numbering.append(abstract)
+    else:
+        numbering.insert(numbering.index(first_num), abstract)
+    num = OxmlElement("w:num")
+    num.set(qn("w:numId"), str(num_id))
+    reference = OxmlElement("w:abstractNumId")
+    reference.set(qn("w:val"), str(abstract_id))
+    num.append(reference)
+    numbering.append(num)
+    set_style_numbering(document.styles["List Number"], level=0, num_id=num_id)
+    return num_id
+
+
 def configure_document(document: Document, page_start: int) -> None:
     section = document.sections[0]
     section.orientation = WD_ORIENT.PORTRAIT
@@ -490,7 +650,7 @@ def configure_document(document: Document, page_start: int) -> None:
     )
 
     configure_style(
-        document.styles["Heading 1"], size=16, bold=True,
+        document.styles["Heading 1"], size=14, bold=True,
         align=WD_ALIGN_PARAGRAPH.LEFT, first_indent_cm=0, left_indent_cm=0,
         line_spacing=1.5, before=0, after=0, keep_next=True,
     )
@@ -531,6 +691,11 @@ def configure_document(document: Document, page_start: int) -> None:
         align=(WD_ALIGN_PARAGRAPH.LEFT if profile_value("table_caption_alignment") == "left" else WD_ALIGN_PARAGRAPH.CENTER),
         first_indent_cm=0,
         line_spacing=float(profile_value("caption_line_spacing")), before=0, after=0, keep_next=True,
+    )
+    configure_style(
+        ensure_style(document, "Report Figure Annotation"), size=14,
+        align=WD_ALIGN_PARAGRAPH.LEFT, first_indent_cm=0,
+        line_spacing=1.5, before=0, after=0, keep_next=True,
     )
     configure_style(
         ensure_style(document, "Report Code Fragment"), font="Courier New", size=12,
@@ -582,8 +747,8 @@ def configure_document(document: Document, page_start: int) -> None:
     )
 
     for name, left, first in (
-        ("List Bullet", 2.5, -0.63),
-        ("List Number", 2.5, -0.63),
+        ("List Bullet", 1066 / 567, -357 / 567),
+        ("List Number", 1066 / 567, -357 / 567),
     ):
         style = document.styles[name]
         configure_style(
@@ -594,6 +759,7 @@ def configure_document(document: Document, page_start: int) -> None:
 
     if profile_value("dash_bullet_lists"):
         configure_dash_bullet_numbering(document)
+        configure_paren_number_numbering(document)
 
     toc_left_indents_cm = profile_value("toc_indents_cm")
     for level in range(1, 4):
@@ -607,8 +773,25 @@ def configure_document(document: Document, page_start: int) -> None:
             after=0,
         )
 
-    add_page_number(section.footer.paragraphs[0])
+    # The first (front-matter) section keeps empty footers: the title page,
+    # assignment, abstract and abbreviation list are counted but their numbers
+    # are not printed (tr23-26 3.4.2). The body section gets the PAGE field.
     add_update_fields(document)
+
+
+def start_body_section(document: Document):
+    """Close the front-matter section and open the numbered body section."""
+    from docx.enum.section import WD_SECTION_START
+
+    body_section = document.add_section(WD_SECTION_START.NEW_PAGE)
+    sect_pr = body_section._sectPr
+    page_numbering = sect_pr.find(qn("w:pgNumType"))
+    if page_numbering is not None:
+        sect_pr.remove(page_numbering)  # continue the section-1 counter
+    body_section.different_first_page_header_footer = False
+    body_section.footer.is_linked_to_previous = False
+    add_page_number(body_section.footer.paragraphs[0])
+    return body_section
 
 
 def add_field(paragraph, instruction: str, placeholder: str = "") -> None:
@@ -681,8 +864,230 @@ def capitalized_label(value: str) -> str:
 
 
 def add_cover(document: Document, spec: dict[str, Any]) -> None:
+    """Dispatch the title page by cover_layout; the body never depends on it."""
     meta = spec["metadata"]
     report_type = spec["report_type"]
+    layout = str(meta.get("cover_layout", "")).strip().casefold() or ("lab" if report_type == "lab" else "course")
+    if layout not in COVER_LAYOUTS:
+        raise SpecError(
+            "metadata.cover_layout must be one of: " + ", ".join(sorted(COVER_LAYOUTS))
+        )
+    if layout == "vkr_2026":
+        add_cover_vkr_2026(document, spec)
+    elif layout == "vkr_tr23":
+        add_cover_vkr_tr23(document, spec)
+    elif layout == "nir":
+        add_cover_nir(document, spec)
+    else:
+        add_cover_student(document, spec, report_type)
+
+
+def add_first_page_footer_text(document: Document, text: str) -> None:
+    section = document.sections[0]
+    section.different_first_page_header_footer = True
+    paragraph = section.first_page_footer.paragraphs[0]
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.first_line_indent = Cm(0)
+    set_run_font(paragraph.add_run(text), "Times New Roman", 14)
+
+
+def add_cover_vkr_2026(document: Document, spec: dict[str, Any]) -> None:
+    """Титульный лист ВКР по официальной форме 2026 года; институт и высшая школа — ИКНК и ВШК."""
+    meta = spec["metadata"]
+    ministry = str(meta.get("ministry", "Министерство науки и высшего образования Российской Федерации")).strip()
+    organization_type = str(meta.get("organization_type", "Федеральное государственное автономное образовательное учреждение высшего образования")).strip()
+    institution = str(meta.get("institution", "Санкт-Петербургский политехнический университет Петра Великого")).strip()
+    institute = str(meta.get("institute", "Институт компьютерных наук и кибербезопасности")).strip()
+    department = str(meta.get("department", "Высшая школа кибербезопасности")).strip()
+    add_centered_paragraph(document, ministry, bold=True)
+    add_centered_paragraph(document, f"{organization_type} «{institution.strip('«»')}»", bold=True)
+    add_centered_paragraph(document, institute, bold=True)
+    department_paragraph = add_centered_paragraph(document, department, bold=True)
+    department_paragraph.paragraph_format.space_after = Pt(64)
+    add_centered_paragraph(document, "ВЫПУСКНАЯ КВАЛИФИКАЦИОННАЯ РАБОТА", bold=True, after=8)
+    work_title = required(meta, "title").strip("«»\"")
+    add_centered_paragraph(document, f"на тему: «{work_title}»", bold=True, after=8)
+    spacer = add_centered_paragraph(document, "")
+    spacer.paragraph_format.space_before = Pt(40)
+    spacer.paragraph_format.space_after = Pt(40)
+    student_course = str(meta.get("student_course", "")).strip() or "____"
+    student_group = str(meta.get("student_group", "")).strip() or "____"
+    student_name = str(meta.get("student_name", "")).strip()
+    advisor_name = str(meta.get("advisor_name", meta.get("reviewer_name", ""))).strip()
+    advisor_position = str(meta.get("advisor_position", meta.get("reviewer_position", ""))).strip()
+    student_display = abbreviate_name(student_name, spaced_initials=False) if student_name else "________________________"
+    advisor_display = abbreviate_name(advisor_name, spaced_initials=True) if advisor_name else "________________________"
+    block_rows = [
+        f"Выполнил(а): студент(ка) {student_course} курса, группы {student_group}",
+        f"Ф.И.О.: {student_display}",
+        "Подпись: ________________________",
+        "",
+        "Научный руководитель:",
+        advisor_position or "ученая степень, должность: ________________________",
+        f"Ф.И.О.: {advisor_display}",
+        "Оценка: _________________________",
+        "Подпись: ________________________",
+        "",
+        "Нормоконтроль:",
+        "Подпись: ________________________",
+    ]
+    for row_text in block_rows:
+        paragraph = document.add_paragraph(style="Report Cover")
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.line_spacing = 1.0
+        paragraph.paragraph_format.space_after = Pt(2)
+        if row_text:
+            set_run_font(paragraph.add_run(row_text), "Times New Roman", 14)
+    city = required(meta, "city")
+    year = required(meta, "year")
+    add_first_page_footer_text(document, f"{city} {year}")
+
+
+def add_cover_vkr_tr23(document: Document, spec: dict[str, Any]) -> None:
+    """Титульный лист ВКР по Приложению А пособия tr23-26; институт и высшая школа — ИКНК и ВШК."""
+    meta = spec["metadata"]
+    ministry = str(meta.get("ministry", "Министерство науки и высшего образования Российской Федерации")).strip()
+    institution = str(meta.get("institution", "Санкт-Петербургский политехнический университет Петра Великого")).strip()
+    institute = str(meta.get("institute", "Институт компьютерных наук и кибербезопасности")).strip()
+    department = str(meta.get("department", "Высшая школа кибербезопасности")).strip()
+    add_centered_paragraph(document, ministry)
+    add_centered_paragraph(document, institution.upper())
+    add_centered_paragraph(document, institute)
+    department_paragraph = add_centered_paragraph(document, department, bold=True)
+    department_paragraph.paragraph_format.space_after = Pt(36)
+    approver_name = str(meta.get("approver_name", "")).strip()
+    approver_display = abbreviate_name(approver_name, spaced_initials=True) if approver_name else ""
+    admission_rows = [
+        str(meta.get("approver_role", "Работа допущена к защите")),
+        str(meta.get("approver_position", "Директор ВШК")),
+        f"_____________ {approver_display}".rstrip(),
+        "«___» ________________ 20__ г.",
+    ]
+    for row_index, row_text in enumerate(admission_rows):
+        paragraph = document.add_paragraph(style="Report Cover")
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.line_spacing = 1.0
+        paragraph.paragraph_format.space_after = Pt(12 if row_index == len(admission_rows) - 1 else 2)
+        paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(content_width_cm()), WD_TAB_ALIGNMENT.RIGHT)
+        set_run_font(paragraph.add_run(f"\t{row_text}"), "Times New Roman", 14)
+    add_centered_paragraph(document, "ВЫПУСКНАЯ КВАЛИФИКАЦИОННАЯ РАБОТА", bold=True, after=2)
+    add_centered_paragraph(document, "вид ВКР (работа бакалавра, дипломный проект, дипломная работа, магистерская диссертация)", size=12, after=16)
+    work_title = required(meta, "title").strip("«»\"")
+    add_centered_paragraph(document, work_title.upper(), bold=True, after=8)
+    direction = str(meta.get("direction", "")).strip()
+    if direction:
+        add_centered_paragraph(document, f"по направлению подготовки {direction}", after=4)
+    profile_name = str(meta.get("profile_name", "")).strip()
+    if profile_name:
+        add_centered_paragraph(document, f"направленность (профиль) {profile_name}", after=8)
+    spacer = add_centered_paragraph(document, "")
+    spacer.paragraph_format.space_before = Pt(20)
+    student_group = str(meta.get("student_group", "")).strip() or "____"
+    student_name = str(meta.get("student_name", "")).strip()
+    advisor_name = str(meta.get("advisor_name", meta.get("reviewer_name", ""))).strip()
+    advisor_position = str(meta.get("advisor_position", meta.get("reviewer_position", ""))).strip()
+    student_display = abbreviate_name(student_name, spaced_initials=True) if student_name else "И.О. Фамилия"
+    advisor_display = abbreviate_name(advisor_name, spaced_initials=True) if advisor_name else "И.О. Фамилия"
+    signer_rows = [
+        ("Выполнил", ""),
+        (f"студент гр. {student_group}", student_display),
+        ("Руководитель", ""),
+        (advisor_position or "должность, ученая степень", advisor_display),
+        ("Консультант по нормоконтролю", "И.О. Фамилия"),
+    ]
+    for left, right in signer_rows:
+        paragraph = document.add_paragraph(style="Report Cover")
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.line_spacing = 1.0
+        paragraph.paragraph_format.space_after = Pt(2)
+        paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(content_width_cm() * 0.55), WD_TAB_ALIGNMENT.CENTER)
+        paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(content_width_cm()), WD_TAB_ALIGNMENT.RIGHT)
+        if left:
+            set_run_font(paragraph.add_run(left), "Times New Roman", 14)
+        if right:
+            set_run_font(paragraph.add_run(f"\t<подпись>\t{right}"), "Times New Roman", 12, italic=True)
+    add_centered_paragraph(document, "")
+    city = required(meta, "city")
+    year = required(meta, "year")
+    add_centered_paragraph(document, city, after=2)
+    add_centered_paragraph(document, year)
+
+
+def add_cover_nir(document: Document, spec: dict[str, Any]) -> None:
+    """Титульный лист отчёта о НИР по ГОСТ 7.32-2017 6.10."""
+    meta = spec["metadata"]
+    ministry = str(meta.get("ministry", "Министерство науки и высшего образования Российской Федерации")).strip()
+    organization_type = str(meta.get("organization_type", "Федеральное государственное автономное образовательное учреждение высшего образования")).strip()
+    institution = str(meta.get("institution", "Санкт-Петербургский политехнический университет Петра Великого")).strip()
+    short_name = str(meta.get("short_name", "СПбПУ")).strip()
+    add_centered_paragraph(document, ministry)
+    add_centered_paragraph(document, organization_type.upper())
+    add_centered_paragraph(document, institution.upper())
+    add_centered_paragraph(document, f"({short_name.upper()})")
+    for label, value in (
+        ("УДК", str(meta.get("udc", "")).strip()),
+        ("Рег. N НИОКТР", str(meta.get("reg_nioktr", "")).strip()),
+        ("Рег. N ИКРБС", str(meta.get("reg_ikrbs", "")).strip()),
+    ):
+        paragraph = document.add_paragraph(style="Report Cover")
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.line_spacing = 1.0
+        paragraph.paragraph_format.space_after = Pt(2)
+        set_run_font(paragraph.add_run(f"{label} {value}" if value else label), "Times New Roman", 14)
+    approver_name = str(meta.get("approver_name", "")).strip()
+    approver_display = abbreviate_name(approver_name, spaced_initials=True) if approver_name else ""
+    approve_rows = [
+        "УТВЕРЖДАЮ",
+        str(meta.get("approver_position", "")) or "________________",
+        f"_____________ {approver_display}".rstrip(),
+        "«__» ____________ 20__ г.",
+    ]
+    for row_index, row_text in enumerate(approve_rows):
+        paragraph = document.add_paragraph(style="Report Cover")
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.line_spacing = 1.0
+        paragraph.paragraph_format.space_after = Pt(10 if row_index == len(approve_rows) - 1 else 2)
+        paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(content_width_cm()), WD_TAB_ALIGNMENT.RIGHT)
+        set_run_font(paragraph.add_run(f"\t{row_text}"), "Times New Roman", 14)
+    add_centered_paragraph(document, "ОТЧЕТ", bold=True, after=2)
+    add_centered_paragraph(document, "О НАУЧНО-ИССЛЕДОВАТЕЛЬСКОЙ РАБОТЕ", bold=True, after=16)
+    work_title = required(meta, "title").strip("«»\"")
+    add_centered_paragraph(document, work_title.upper(), bold=True, after=4)
+    stage = str(meta.get("report_stage", "")).strip()
+    if stage:
+        add_centered_paragraph(document, f"({stage})", after=8)
+    leader_name = str(meta.get("leader_name", meta.get("advisor_name", ""))).strip()
+    leader_position = str(meta.get("leader_position", "")).strip()
+    for row_text in ("Руководитель НИР,", leader_position or "________________"):
+        paragraph = document.add_paragraph(style="Report Cover")
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.line_spacing = 1.0
+        paragraph.paragraph_format.space_after = Pt(2)
+        set_run_font(paragraph.add_run(row_text), "Times New Roman", 14)
+    paragraph = document.add_paragraph(style="Report Cover")
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    paragraph.paragraph_format.first_line_indent = Cm(0)
+    paragraph.paragraph_format.line_spacing = 1.0
+    paragraph.paragraph_format.space_after = Pt(2)
+    paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(content_width_cm()), WD_TAB_ALIGNMENT.RIGHT)
+    set_run_font(paragraph.add_run("________________"), "Times New Roman", 14)
+    if leader_name:
+        set_run_font(paragraph.add_run(f"\t{abbreviate_name(leader_name, spaced_initials=True)}"), "Times New Roman", 14)
+    bottom = add_centered_paragraph(document, "")
+    bottom.paragraph_format.space_before = Pt(100)
+    city = required(meta, "city")
+    year = required(meta, "year")
+    add_centered_paragraph(document, f"{city} {year}")
+
+
+def add_cover_student(document: Document, spec: dict[str, Any], report_type: str) -> None:
+    meta = spec["metadata"]
 
     ministry = str(meta.get("ministry", "Министерство науки и высшего образования Российской Федерации")).strip()
     organization_type = str(
@@ -816,6 +1221,7 @@ def keep_previous_reference(document: Document, *, max_characters: int = 180) ->
 
 
 def add_heading(document: Document, block: dict[str, Any]) -> None:
+    clear_pending_gap()
     level = int(block.get("level", 1))
     if level not in (1, 2, 3):
         raise SpecError(f"Heading level must be 1, 2, or 3: {level}")
@@ -828,7 +1234,7 @@ def add_heading(document: Document, block: dict[str, Any]) -> None:
         structural = bool(block["structural"])
     else:
         structural = level == 1 and bool(re.match(
-            r"^(?:СОДЕРЖАНИЕ|ВВЕДЕНИЕ|ЗАКЛЮЧЕНИЕ|ВЫВОДЫ|СПИСОК|ПРИЛОЖЕНИЕ)", text, re.I
+            r"^(?:СОДЕРЖАНИЕ|ВВЕДЕНИЕ|ЗАКЛЮЧЕНИЕ|ВЫВОДЫ|СПИСОК|ПРИЛОЖЕНИЕ|РЕФЕРАТ|ABSTRACT|ЗАДАНИЕ)", text, re.I
         ))
     style = "Report Structural Heading" if structural else f"Heading {level}"
     if structural and profile_value("uppercase_structural"):
@@ -837,26 +1243,29 @@ def add_heading(document: Document, block: dict[str, Any]) -> None:
     if "page_break_before" in block:
         page_break_before = bool(block["page_break_before"])
     else:
-        normalized_heading = re.sub(r"\s+", " ", text.strip().casefold())
-        if level == 1 and normalized_heading in OPENING_PAGE_HEADINGS:
-            page_break_before = False
-        else:
-            page_break_before = level == 1 and normalized_heading in DEFAULT_NEW_PAGE_HEADINGS
+        # GOST 7.32-2017 6.2.1 / tr23-26 3.3.1: every structural element and
+        # every main-part section starts on a new page.
+        page_break_before = structural or level == 1
     paragraph.paragraph_format.page_break_before = page_break_before
     if structural:
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         paragraph.paragraph_format.left_indent = Cm(0)
         paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.space_before = Pt(0)
     else:
         # Match the confirmed Word layout exactly. The direct first-line
         # position overrides application-specific list defaults, so the
         # number begins at 1.25 cm in both Word and LibreOffice.
         paragraph.paragraph_format.left_indent = Cm(0)
         paragraph.paragraph_format.first_line_indent = Cm(1.25)
+        # tr23-26 3.3.3: one free line between the previous text and the
+        # next heading (only for in-flow subsection headings).
+        paragraph.paragraph_format.space_before = Pt(0 if page_break_before else BLANK_LINE_PT)
 
 
 def add_paragraph_block(document: Document, block: dict[str, Any]) -> None:
     paragraph = document.add_paragraph()
+    apply_pending_gap(paragraph.paragraph_format)
     alignments = {
         "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
         "left": WD_ALIGN_PARAGRAPH.LEFT,
@@ -922,21 +1331,151 @@ def add_abbreviations(document: Document, block: dict[str, Any]) -> None:
     items = block.get("items")
     if not isinstance(items, list) or not items:
         raise SpecError("abbreviations requires a non-empty items list")
-    title = "ПЕРЕЧЕНЬ СОКРАЩЕНИЙ И ОБОЗНАЧЕНИЙ" if profile_value("uppercase_structural") else "Перечень сокращений и обозначений"
-    heading = document.add_paragraph(title, style="Report Structural Heading")
-    heading.paragraph_format.page_break_before = True
-    heading.paragraph_format.first_line_indent = Cm(0)
+    if len(items) <= 3:
+        raise SpecError(
+            "Перечень сокращений составляют только при более чем трёх обозначениях "
+            "(tr23-26 2.4.2); при меньшем числе раскройте сокращение в тексте при первом упоминании"
+        )
+    parsed: list[tuple[str, str]] = []
     for index, item in enumerate(items):
         if not isinstance(item, dict):
             raise SpecError(f"abbreviations item {index} must be an object")
         term = clean_text(item.get("term"), field=f"abbreviations[{index}].term")
         definition = clean_text(item.get("definition"), field=f"abbreviations[{index}].definition")
+        parsed.append((term, definition))
+    parsed.sort(key=lambda pair: pair[0].casefold())
+    clear_pending_gap()
+    title = "ПЕРЕЧЕНЬ СОКРАЩЕНИЙ И ОБОЗНАЧЕНИЙ" if profile_value("uppercase_structural") else "Перечень сокращений и обозначений"
+    heading = document.add_paragraph(title, style="Report Structural Heading")
+    heading.paragraph_format.page_break_before = True
+    heading.paragraph_format.first_line_indent = Cm(0)
+    lead_in = document.add_paragraph()
+    lead_in.paragraph_format.first_line_indent = Cm(1.25)
+    add_report_text(lead_in, "В настоящей работе применяют следующие сокращения и обозначения:")
+    keep_paragraph_lines(lead_in)
+    for term, definition in parsed:
         paragraph = document.add_paragraph()
-        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.left_indent = Cm(4.0)
+        paragraph.paragraph_format.first_line_indent = Cm(-4.0)
         paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(4.0), WD_TAB_ALIGNMENT.LEFT)
         set_run_font(paragraph.add_run(term), "Times New Roman", 14)
-        set_run_font(paragraph.add_run("\t"), "Times New Roman", 14)
+        set_run_font(paragraph.add_run("\t– "), "Times New Roman", 14)
         add_report_text(paragraph, definition)
+        keep_paragraph_lines(paragraph)
+
+
+def count_spec_objects(blocks: list[dict[str, Any]]) -> tuple[int, int, int, int]:
+    figures = tables = sources = appendices = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type in {"figure", "figure_placeholder"}:
+            figures += 1
+        elif block_type == "table":
+            tables += 1
+        elif block_type == "bibliography":
+            sources += len(block.get("items", []) or [])
+        elif block_type == "appendix_heading":
+            appendices += 1
+    return figures, tables, sources, appendices
+
+
+def structural_front_heading(document: Document, title: str) -> None:
+    """A front-matter heading: uppercase, centred, own page, outside the TOC."""
+    heading = document.add_paragraph(title.upper(), style="Report Structural Heading")
+    heading.paragraph_format.page_break_before = True
+    heading.paragraph_format.first_line_indent = Cm(0)
+    outline = OxmlElement("w:outlineLvl")
+    outline.set(qn("w:val"), "9")
+    heading._p.get_or_add_pPr().append(outline)
+
+
+def add_abstract(document: Document, block: dict[str, Any]) -> None:
+    """РЕФЕРАТ and its English ABSTRACT (tr23-26 2.3)."""
+    keywords = block.get("keywords")
+    ru_text = block.get("text")
+    en = block.get("en") if isinstance(block.get("en"), dict) else {}
+    en_keywords = en.get("keywords")
+    en_text = en.get("text")
+    for label, value, low, high in (
+        ("abstract.keywords", keywords, 5, 15),
+        ("abstract.en.keywords", en_keywords, 5, 15),
+    ):
+        if not isinstance(value, list) or not (low <= len(value) <= high):
+            raise SpecError(f"{label} must contain 5..15 key words")
+    for label, value in (("abstract.text", ru_text), ("abstract.en.text", en_text)):
+        if not isinstance(value, list) or not value:
+            raise SpecError(f"{label} must be a non-empty list of paragraphs")
+    figures, tables, sources, appendices = count_spec_objects(document._report_blocks)  # type: ignore[attr-defined]
+    volume_line = (
+        f"Работа содержит: __ с., {figures} рис., {tables} табл., {sources} источ., {appendices} прил."
+    )
+    clear_pending_gap()
+    structural_front_heading(document, "Реферат")
+    volume_paragraph = document.add_paragraph()
+    volume_paragraph.paragraph_format.first_line_indent = Cm(1.25)
+    set_run_font(volume_paragraph.add_run(volume_line), "Times New Roman", 14)
+    keep_paragraph_lines(volume_paragraph)
+    keywords_paragraph = document.add_paragraph()
+    keywords_paragraph.paragraph_format.first_line_indent = Cm(0)
+    set_run_font(
+        keywords_paragraph.add_run("КЛЮЧЕВЫЕ СЛОВА: " + ", ".join(str(word).upper() for word in keywords)),
+        "Times New Roman", 14,
+    )
+    keep_paragraph_lines(keywords_paragraph)
+    for item in ru_text:
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.first_line_indent = Cm(1.25)
+        add_report_text(paragraph, clean_text(item, field="abstract text"))
+        keep_paragraph_lines(paragraph)
+
+    structural_front_heading(document, "Abstract")
+    en_volume_paragraph = document.add_paragraph()
+    en_volume_paragraph.paragraph_format.first_line_indent = Cm(1.25)
+    set_run_font(
+        en_volume_paragraph.add_run(
+            f"The work contains: __ pages, {figures} figures, {tables} tables, {sources} sources, {appendices} appendices."
+        ),
+        "Times New Roman", 14,
+    )
+    keep_paragraph_lines(en_volume_paragraph)
+    en_keywords_paragraph = document.add_paragraph()
+    en_keywords_paragraph.paragraph_format.first_line_indent = Cm(0)
+    set_run_font(
+        en_keywords_paragraph.add_run("KEYWORDS: " + ", ".join(str(word).upper() for word in en_keywords)),
+        "Times New Roman", 14,
+    )
+    keep_paragraph_lines(en_keywords_paragraph)
+    for item in en_text:
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.first_line_indent = Cm(1.25)
+        add_report_text(paragraph, clean_text(item, field="abstract en text"))
+        keep_paragraph_lines(paragraph)
+
+
+def add_assignment(document: Document, block: dict[str, Any]) -> None:
+    """ЗАДАНИЕ on the work (tr23-26 Приложение Б shape)."""
+    fields = block.get("fields")
+    if not isinstance(fields, list) or not fields:
+        raise SpecError("assignment requires a non-empty fields list")
+    clear_pending_gap()
+    structural_front_heading(document, "Задание")
+    subtitle = document.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle.paragraph_format.first_line_indent = Cm(0)
+    set_run_font(subtitle.add_run("на выполнение выпускной квалификационной работы"), "Times New Roman", 14, bold=True)
+    keep_paragraph_lines(subtitle)
+    for index, field in enumerate(fields, 1):
+        if not isinstance(field, dict):
+            raise SpecError(f"assignment field {index} must be an object")
+        label = clean_text(field.get("label"), field=f"assignment[{index}].label")
+        value = str(field.get("value", "")).strip()
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.first_line_indent = Cm(1.25)
+        set_run_font(paragraph.add_run(f"{index}. {label}: "), "Times New Roman", 14)
+        if value:
+            add_report_text(paragraph, value)
         keep_paragraph_lines(paragraph)
 
 
@@ -945,8 +1484,10 @@ def add_list(document: Document, block: dict[str, Any], numbered: bool) -> None:
     items = block.get("items")
     if not isinstance(items, list) or not items:
         raise SpecError(f"{block.get('type')} requires a non-empty items list")
-    for item in items:
+    for index, item in enumerate(items):
         paragraph = document.add_paragraph(style=style)
+        if index == 0:
+            apply_pending_gap(paragraph.paragraph_format)
         add_report_text(paragraph, clean_text(item, field="list item"))
         keep_paragraph_lines(paragraph)
 
@@ -962,7 +1503,8 @@ def add_figure(document: Document, block: dict[str, Any]) -> None:
     paragraph = document.add_paragraph()
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     paragraph.paragraph_format.first_line_indent = Cm(0)
-    paragraph.paragraph_format.space_before = Pt(0)
+    # tr23-26 3.6.6: one free line between the text and the figure.
+    paragraph.paragraph_format.space_before = Pt(BLANK_LINE_PT)
     paragraph.paragraph_format.space_after = Pt(0)
     paragraph.paragraph_format.keep_with_next = True
     run = paragraph.add_run()
@@ -971,6 +1513,18 @@ def add_figure(document: Document, block: dict[str, Any]) -> None:
     if alt:
         doc_pr = shape._inline.docPr
         doc_pr.set("descr", alt)
+    annotation = block.get("annotation")
+    if annotation:
+        annotation_lines = annotation if isinstance(annotation, list) else [annotation]
+        for annotation_line in annotation_lines:
+            annotation_paragraph = document.add_paragraph(style="Report Figure Annotation")
+            annotation_paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            annotation_paragraph.paragraph_format.first_line_indent = Cm(0)
+            annotation_paragraph.paragraph_format.space_before = Pt(0)
+            annotation_paragraph.paragraph_format.space_after = Pt(0)
+            annotation_paragraph.paragraph_format.keep_with_next = True
+            add_report_text(annotation_paragraph, clean_text(annotation_line, field="figure annotation"))
+            keep_paragraph_lines(annotation_paragraph)
     number = clean_text(block.get("number", ""), field="figure number")
     if not number:
         raise SpecError("figure requires a number")
@@ -982,6 +1536,7 @@ def add_figure(document: Document, block: dict[str, Any]) -> None:
     label = f"Рисунок {number} – {caption}"
     caption_paragraph = document.add_paragraph(label, style="Report Caption")
     add_bookmark(document, caption_paragraph, figure_bookmark_name(number))
+    request_gap_after_object()
 
 
 def set_paragraph_border(paragraph, *, size: int = 4, color: str = "000000") -> None:
@@ -1038,6 +1593,7 @@ def add_figure_placeholder(document: Document, block: dict[str, Any]) -> None:
     label = f"Рисунок {number} – {caption}"
     caption_paragraph = document.add_paragraph(label, style="Report Caption")
     add_bookmark(document, caption_paragraph, figure_bookmark_name(number))
+    request_gap_after_object()
 
 
 def set_repeat_table_header(row) -> None:
@@ -1312,7 +1868,9 @@ def add_table(document: Document, block: dict[str, Any]) -> None:
         else:
             label = f"Продолжение таблицы {number}"
         caption_paragraph = document.add_paragraph(label, style="Report Table Caption")
-        caption_paragraph.paragraph_format.space_before = Pt(0)
+        # tr23-26 3.7.3: one free line between the text and the table; the
+        # continuation captions sit at the top of a fresh page and need no gap.
+        caption_paragraph.paragraph_format.space_before = Pt(BLANK_LINE_PT if part_index == 0 else 0)
         caption_paragraph.paragraph_format.space_after = Pt(0)
         add_table_part(
             document,
@@ -1328,6 +1886,7 @@ def add_table(document: Document, block: dict[str, Any]) -> None:
         )
         if part_index < len(parts) - 1:
             document.add_page_break()
+    request_gap_after_object()
 
 
 
@@ -1358,7 +1917,11 @@ def latex_to_omath(latex: str):
 
 
 def add_equation(document: Document, block: dict[str, Any]) -> None:
+    clear_pending_gap()
     paragraph = document.add_paragraph(style="Report Equation")
+    # GOST 7.32-2017 6.8.1 / tr23-26 3.9.1: at least one free line above and
+    # below every formula; the gap below is requested from the next paragraph.
+    paragraph.paragraph_format.space_before = Pt(BLANK_LINE_PT)
     number = str(block.get("number", "")).strip()
     if number:
         paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -1430,6 +1993,7 @@ def add_equation(document: Document, block: dict[str, Any]) -> None:
         run.add_tab()
         run.add_text(f"({number})")
         set_run_font(run, "Times New Roman", 14)
+    request_gap_after_object()
 
 
 def add_code(document: Document, block: dict[str, Any]) -> None:
@@ -1533,10 +2097,12 @@ def add_appendix_heading(document: Document, block: dict[str, Any]) -> None:
 
 
 def add_bibliography(document: Document, block: dict[str, Any]) -> None:
+    clear_pending_gap()
     title = clean_text(block.get("title", "Список использованных источников"), field="bibliography title")
     if profile_value("uppercase_structural"):
         title = title.upper()
     heading = document.add_paragraph(title, style="Report Structural Heading")
+    heading.paragraph_format.page_break_before = True
     heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
     heading.paragraph_format.first_line_indent = Cm(0)
     items = block.get("items")
@@ -1587,6 +2153,8 @@ def add_content(document: Document, blocks: Iterable[dict[str, Any]]) -> None:
         "paragraph": add_paragraph_block,
         "note": add_note,
         "abbreviations": add_abbreviations,
+        "abstract": add_abstract,
+        "assignment": add_assignment,
         "bullet_list": lambda doc, block: add_list(doc, block, False),
         "numbered_list": lambda doc, block: add_list(doc, block, True),
         "figure": add_figure,
@@ -1603,6 +2171,7 @@ def add_content(document: Document, blocks: Iterable[dict[str, Any]]) -> None:
         block_type = block.get("type")
         if block_type == "page_break":
             document.add_page_break()
+            clear_pending_gap()
             continue
         handler = handlers.get(block_type)
         if handler is None:
@@ -1620,7 +2189,8 @@ def validate_spec(spec: dict[str, Any]) -> None:
     document_settings = spec.get("document") or {}
     if not isinstance(document_settings, dict):
         raise SpecError("document must be an object")
-    format_profile = str(document_settings.get("format_profile", "spbpu")).strip()
+    format_profile = str(document_settings.get("format_profile", "unified")).strip()
+    format_profile = LEGACY_FORMAT_PROFILES.get(format_profile, format_profile)
     if format_profile not in FORMAT_PROFILES:
         raise SpecError(
             "document.format_profile must be one of: " + ", ".join(sorted(FORMAT_PROFILES))
@@ -1723,10 +2293,22 @@ def validate_spec(spec: dict[str, Any]) -> None:
         if level > previous_numbered_level + 1:
             raise SpecError(f"Heading hierarchy skips a level at content[{index}]: {text!r}")
         previous_numbered_level = level
-    for key in (
-        "title", "discipline", "student_group", "student_name",
-        "reviewer_position", "reviewer_name", "city", "year",
-    ):
+    cover_layout = str((spec["metadata"] or {}).get("cover_layout", "")).strip().casefold() or (
+        "lab" if spec["report_type"] == "lab" else "course"
+    )
+    if cover_layout not in COVER_LAYOUTS:
+        raise SpecError(
+            "metadata.cover_layout must be one of: " + ", ".join(sorted(COVER_LAYOUTS))
+        )
+    required_keys = {"title", "city", "year"}
+    if cover_layout in {"lab", "course"}:
+        required_keys |= {
+            "discipline", "student_group", "student_name",
+            "reviewer_position", "reviewer_name",
+        }
+    elif cover_layout in {"vkr_2026", "vkr_tr23"}:
+        required_keys |= {"student_name", "student_group"}
+    for key in sorted(required_keys):
         required(spec["metadata"], key)
 
 
@@ -1800,13 +2382,16 @@ def build(spec: dict[str, Any], output: Path) -> None:
     global ACTIVE_FORMAT_PROFILE_NAME, ACTIVE_FORMAT_PROFILE
     validate_spec(spec)
     settings = spec.get("document") or {}
-    ACTIVE_FORMAT_PROFILE_NAME = str(settings.get("format_profile", "spbpu")).strip()
+    requested_profile = str(settings.get("format_profile", "unified")).strip()
+    ACTIVE_FORMAT_PROFILE_NAME = LEGACY_FORMAT_PROFILES.get(requested_profile, requested_profile)
     ACTIVE_FORMAT_PROFILE = FORMAT_PROFILES[ACTIVE_FORMAT_PROFILE_NAME]
+    _FOOTNOTES.clear()
+    _PENDING_OBJECT_GAP["active"] = False
     document = Document()
-    configure_document(
-        document,
-        int(settings.get("page_number_start", profile_value("page_number_start"))),
-    )
+    # Continuous physical numbering from the title page; the title page number
+    # stays hidden via a different first-page footer, so the first visible
+    # number always matches the real rendered position without hardcoding.
+    configure_document(document, int(settings.get("page_number_start", 1) or 1))
 
     properties = document.core_properties
     properties.title = required(spec["metadata"], "title")
@@ -1815,19 +2400,42 @@ def build(spec: dict[str, Any], output: Path) -> None:
     properties.last_modified_by = ""
     properties.keywords = f"academic-report-format-profile:{ACTIVE_FORMAT_PROFILE_NAME}"
     properties.comments = ""
+    report_type = spec["report_type"]
+    cover_layout = str(spec["metadata"].get("cover_layout", "")).strip().casefold() or (
+        "lab" if report_type == "lab" else "course"
+    )
+    properties.category = f"{report_type} {cover_layout}"
+
+    document._report_blocks = spec["content"]  # type: ignore[attr-defined]
 
     add_cover(document, spec)
+    content = [dict(block) for block in spec["content"]]
+    front_matter = [
+        block for block in content
+        if block.get("type") in FRONT_MATTER_TYPES
+        and str(block.get("position", "front")).strip().casefold() != "body"
+    ]
+    body_blocks = [
+        block for block in content
+        if not (block.get("type") in FRONT_MATTER_TYPES
+                and str(block.get("position", "front")).strip().casefold() != "body")
+    ]
+    for block in front_matter:
+        add_content(document, [block])
     include_toc = bool(settings.get("include_toc", True))
     if include_toc:
+        start_body_section(document)
         levels = max(1, min(3, int(settings.get("toc_levels", 3))))
         add_toc(document, levels)
-    content = [dict(block) for block in spec["content"]]
-    if include_toc and content:
-        if content[0].get("type") == "heading":
-            content[0]["page_break_before"] = True
+    if not include_toc:
+        start_body_section(document)
+    if include_toc and body_blocks:
+        if body_blocks[0].get("type") == "heading":
+            body_blocks[0]["page_break_before"] = True
         else:
-            content.insert(0, {"type": "page_break"})
-    add_content(document, content)
+            body_blocks.insert(0, {"type": "page_break"})
+    add_content(document, body_blocks)
+    attach_footnotes(document)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     document.save(output)
@@ -1862,11 +2470,12 @@ def main() -> int:
         if subjects_path is None and isinstance(spec, dict) and spec.get("subject_profile_path"):
             subjects_path = Path(str(spec["subject_profile_path"]))
         current_metadata = spec.get("metadata") if isinstance(spec, dict) else None
+        cover_layout = str((current_metadata or {}).get("cover_layout", "")).strip().casefold()
         reviewer_is_missing = not isinstance(current_metadata, dict) or any(
             not str(current_metadata.get(key, "")).strip()
             for key in ("reviewer_position", "reviewer_name")
         )
-        if subjects_path is None and reviewer_is_missing:
+        if subjects_path is None and reviewer_is_missing and cover_layout not in {"vkr_2026", "vkr_tr23", "nir"}:
             candidate = built_in_assets / "report-subjects.default.json"
             if candidate.is_file():
                 subjects_path = candidate
