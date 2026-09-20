@@ -155,7 +155,7 @@
 Для выделения начала:
 
 ```json
-{"type":"paragraph","bold_prefix":"Цель работы — ","text":"описание цели."}
+{"type":"paragraph","bold_prefix":"Цель работы – ","text":"описание цели."}
 ```
 
 ### Список
@@ -324,7 +324,7 @@
   "document":{"include_toc":true},
   "content":[
     {"type":"heading","level":1,"text":"Цель работы","page_break_before":true},
-    {"type":"paragraph","bold_prefix":"Цель работы — ","text":"исследовать алгоритм."},
+    {"type":"paragraph","bold_prefix":"Цель работы – ","text":"исследовать алгоритм."},
     {"type":"heading","level":1,"text":"Ход работы","page_break_before":true},
     {"type":"paragraph","text":"Выполнена подготовка исходных данных."},
     {"type":"heading","level":1,"text":"Выводы","page_break_before":true},
