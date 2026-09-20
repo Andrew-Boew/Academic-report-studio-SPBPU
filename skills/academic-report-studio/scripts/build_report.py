@@ -30,6 +30,7 @@ from lxml import etree
 
 
 MAX_CONTENT_WIDTH_CM = 16.5
+OMML_NAMESPACES = {"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}
 PLACEHOLDER_PATTERN = re.compile(r"\{\{|\}\}|\b(?:TODO|TBD|FIXME)\b|\[вставить[^\]]*\]", re.I)
 MANUAL_HEADING_NUMBER = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+")
 CITATION_PATTERN = re.compile(r"\[(\d+)\]")
@@ -1136,8 +1137,7 @@ def latex_to_omath(latex: str):
         with zipfile.ZipFile(output) as archive:
             xml = archive.read("word/document.xml")
     root = etree.fromstring(xml)
-    namespaces = {"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}
-    nodes = root.xpath(".//m:oMath", namespaces=namespaces)
+    nodes = root.xpath(".//m:oMath", namespaces=OMML_NAMESPACES)
     if not nodes:
         raise SpecError("Pandoc produced no OMML equation")
     return copy.deepcopy(nodes[0])
@@ -1155,7 +1155,11 @@ def add_equation(document: Document, block: dict[str, Any]) -> None:
             Cm(MAX_CONTENT_WIDTH_CM), WD_TAB_ALIGNMENT.RIGHT
         )
         paragraph.add_run().add_tab()
-    latex = clean_text(block.get("latex"), field="equation latex")
+    latex = str(block.get("latex", "")).strip()
+    if not latex:
+        raise SpecError("equation requires non-empty LaTeX")
+    if re.search(r"\b(?:TODO|TBD|FIXME)\b|\[вставить[^\]]*\]", latex, re.I):
+        raise SpecError(f"Placeholder detected in equation latex: {latex[:80]}")
     if re.search(r"\\\\|\\begin\{(?:aligned|alignedat|array|matrix|pmatrix|bmatrix|vmatrix|Vmatrix)\}", latex):
         raise SpecError(
             "one equation block must contain one equation or parameter value; "
@@ -1170,7 +1174,7 @@ def add_equation(document: Document, block: dict[str, Any]) -> None:
     equation_half_points = "28"
     paragraph.style = document.styles[f"Report Equation {equation_half_points}"]
     equation = copy.deepcopy(latex_to_omath(latex))
-    for math_run in equation.xpath(".//m:r"):
+    for math_run in equation.xpath(".//m:r", namespaces=OMML_NAMESPACES):
         rpr = math_run.find(qn("w:rPr"))
         if rpr is None:
             rpr = OxmlElement("w:rPr")
