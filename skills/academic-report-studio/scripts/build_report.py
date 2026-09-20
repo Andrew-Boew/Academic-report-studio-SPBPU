@@ -72,6 +72,13 @@ FIGURE_REFERENCE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 FOOTNOTE_PATTERN = re.compile(r"\[\^([^\]\[]+)\]")
+# Prose references to numbered objects; every one becomes an internal hyperlink.
+TABLE_REFERENCE_PATTERN = re.compile(r"\bтабл\w*\s+((?:[А-ЯЁ]\.)?\d+(?:\.\d+)*)", re.I)
+LISTING_REFERENCE_PATTERN = re.compile(r"\bлистинг\w*\s+((?:[А-ЯЁ]\.)?\d+(?:\.\d+)*)", re.I)
+EQUATION_REFERENCE_PATTERN = re.compile(r"\(((?:[А-ЯЁ]\.)?\d+(?:\.\d+)*)\)")
+# Inline math in prose: $...$ carries a LaTeX expression that becomes a real
+# inline OMML object (Cambria Math) instead of styled plain text.
+INLINE_MATH_PATTERN = re.compile(r"\$([^$]+)\$")
 CYRILLIC_BOOKMARK_LETTERS = {
     "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E",
     "Ж": "ZH", "З": "Z", "И": "I", "К": "K", "Л": "L", "М": "M",
@@ -118,6 +125,11 @@ def normalize_report_text(text: str) -> str:
 
 
 _PENDING_OBJECT_GAP = {"active": False}
+# Kind of the previous content block: "heading", "text", "object" or None.
+_LAST_BLOCK_KIND = {"kind": None}
+# Numbers of equations declared in the spec; a bare `(N)` in prose links to the
+# equation only when N is a real numbered equation of this document.
+_KNOWN_EQUATION_NUMBERS: set[str] = set()
 
 
 def request_gap_after_object() -> None:
@@ -136,6 +148,48 @@ def clear_pending_gap() -> None:
 
 
 _FOOTNOTES: list[str] = []
+
+
+def style_math_runs(node, half_points: str = "28") -> None:
+    """Force Cambria Math and the given size on every math run of the node."""
+    for math_run in node.xpath(".//m:r", namespaces=OMML_NAMESPACES):
+        rpr = math_run.find(qn("w:rPr"))
+        if rpr is None:
+            rpr = OxmlElement("w:rPr")
+            math_run.insert(0, rpr)
+        fonts = rpr.find(qn("w:rFonts"))
+        if fonts is None:
+            fonts = OxmlElement("w:rFonts")
+            rpr.insert(0, fonts)
+        for key in ("ascii", "hAnsi", "eastAsia", "cs"):
+            fonts.set(qn(f"w:{key}"), "Cambria Math")
+        for tag in ("w:sz", "w:szCs"):
+            size = rpr.find(qn(tag))
+            if size is None:
+                size = OxmlElement(tag)
+                rpr.append(size)
+            size.set(qn("w:val"), half_points)
+        character_spacing = rpr.find(qn("w:spacing"))
+        if character_spacing is not None:
+            rpr.remove(character_spacing)
+
+
+def add_inline_math(paragraph, latex: str) -> None:
+    """Insert a real inline OMML equation into the run flow at this position."""
+    latex = latex.strip()
+    if not latex:
+        raise SpecError("inline math requires non-empty LaTeX")
+    if re.search(r"\b(?:TODO|TBD|FIXME)\b|\[вставить[^\]]*\]", latex, re.I):
+        raise SpecError(f"Placeholder detected in inline math: {latex[:80]}")
+    if INLINE_MATH_PATTERN.search(latex):
+        raise SpecError("nested inline math markers are not allowed")
+    if re.search(r"\\\|\\begin\{", latex):
+        raise SpecError(
+            "inline math must stay short; use a separate equation block for multiline expressions"
+        )
+    equation = copy.deepcopy(latex_to_omath(latex))
+    style_math_runs(equation)
+    paragraph._p.append(equation)
 
 
 def add_footnote_reference(paragraph, note_text: str) -> None:
@@ -302,14 +356,19 @@ def add_internal_hyperlink(paragraph, text: str, anchor: str) -> None:
     paragraph._p.append(hyperlink)
 
 
-def figure_bookmark_name(number: str) -> str:
-    """Return a Word-safe stable bookmark name for a figure number."""
+def object_bookmark_name(kind: str, number: str) -> str:
+    """Return a Word-safe stable bookmark name for a numbered object."""
     normalized = number.strip().upper()
     match = re.fullmatch(r"([А-ЯЁ])\.(\d+)", normalized)
     if match:
         letter = CYRILLIC_BOOKMARK_LETTERS.get(match.group(1), f"CYR{ord(match.group(1))}")
-        return f"_ReportFigure_{letter}_{match.group(2)}"
-    return "_ReportFigure_" + re.sub(r"[^A-Z0-9_]", "_", normalized)
+        return f"_Report{kind}_{letter}_{match.group(2)}"
+    return f"_Report{kind}_" + re.sub(r"[^A-Z0-9_]", "_", normalized)
+
+
+def figure_bookmark_name(number: str) -> str:
+    """Return a Word-safe stable bookmark name for a figure number."""
+    return object_bookmark_name("Figure", number)
 
 
 def add_bookmark(document: Document, paragraph, name: str) -> None:
@@ -330,10 +389,14 @@ def add_bookmark(document: Document, paragraph, name: str) -> None:
 
 
 def _add_linked_text(paragraph, text: str) -> None:
-    """Write one text segment and turn source and figure references into internal links."""
+    """Write one text segment; source, figure, table, listing and equation
+    references become black internal hyperlinks to the object bookmarks."""
     matches: list[tuple[int, int, str, Any]] = []
     matches.extend((match.start(), match.end(), "source", match) for match in CITATION_PATTERN.finditer(text))
     matches.extend((match.start(), match.end(), "figure", match) for match in FIGURE_REFERENCE_PATTERN.finditer(text))
+    matches.extend((match.start(), match.end(), "table", match) for match in TABLE_REFERENCE_PATTERN.finditer(text))
+    matches.extend((match.start(), match.end(), "listing", match) for match in LISTING_REFERENCE_PATTERN.finditer(text))
+    matches.extend((match.start(), match.end(), "equation", match) for match in EQUATION_REFERENCE_PATTERN.finditer(text))
     matches.sort(key=lambda item: item[0])
     cursor = 0
     for start, end, kind, match in matches:
@@ -345,8 +408,19 @@ def _add_linked_text(paragraph, text: str) -> None:
         if kind == "source":
             number = int(match.group(1))
             add_internal_hyperlink(paragraph, match.group(0), f"_ReportBib{number}")
-        else:
+        elif kind == "figure":
             add_internal_hyperlink(paragraph, match.group(0), figure_bookmark_name(match.group("number")))
+        elif kind == "table":
+            add_internal_hyperlink(paragraph, match.group(0), object_bookmark_name("Table", match.group(1)))
+        elif kind == "listing":
+            add_internal_hyperlink(paragraph, match.group(0), object_bookmark_name("Listing", match.group(1)))
+        else:
+            number = match.group(1)
+            if number in _KNOWN_EQUATION_NUMBERS:
+                add_internal_hyperlink(paragraph, match.group(0), object_bookmark_name("Equation", number))
+            else:
+                run = paragraph.add_run(match.group(0))
+                set_run_font(run, "Times New Roman", 14)
         cursor = end
     if cursor < len(text):
         run = paragraph.add_run(text[cursor:])
@@ -354,20 +428,35 @@ def _add_linked_text(paragraph, text: str) -> None:
 
 
 def add_report_text(paragraph, text: str) -> None:
-    """Write body text; `[^текст]` markers become real Microsoft Word footnotes."""
+    """Write body text; `[^текст]` becomes a real footnote, `$latex$` a real inline OMML equation."""
     text = normalize_report_text(text)
-    footnote_matches = list(FOOTNOTE_PATTERN.finditer(text))
-    if not footnote_matches:
-        _add_linked_text(paragraph, text)
-        return
+    segments: list[tuple[str, str]] = []
     cursor = 0
-    for match in footnote_matches:
+    for match in INLINE_MATH_PATTERN.finditer(text):
         if match.start() > cursor:
-            _add_linked_text(paragraph, text[cursor:match.start()])
-        add_footnote_reference(paragraph, match.group(1))
+            segments.append(("text", text[cursor:match.start()]))
+        segments.append(("math", match.group(1)))
         cursor = match.end()
     if cursor < len(text):
-        _add_linked_text(paragraph, text[cursor:])
+        segments.append(("text", text[cursor:]))
+    if not any(kind == "math" for kind, _ in segments):
+        segments = [("text", text)]
+    for kind, value in segments:
+        if kind == "math":
+            add_inline_math(paragraph, value)
+            continue
+        footnote_matches = list(FOOTNOTE_PATTERN.finditer(value))
+        if not footnote_matches:
+            _add_linked_text(paragraph, value)
+            continue
+        inner_cursor = 0
+        for match in footnote_matches:
+            if match.start() > inner_cursor:
+                _add_linked_text(paragraph, value[inner_cursor:match.start()])
+            add_footnote_reference(paragraph, match.group(1))
+            inner_cursor = match.end()
+        if inner_cursor < len(value):
+            _add_linked_text(paragraph, value[inner_cursor:])
 
 
 def configure_style(style, *, font="Times New Roman", size=14, bold=None, italic=None,
@@ -990,12 +1079,14 @@ def add_cover_vkr_tr23(document: Document, spec: dict[str, Any]) -> None:
     advisor_position = str(meta.get("advisor_position", meta.get("reviewer_position", ""))).strip()
     student_display = abbreviate_name(student_name, spaced_initials=True) if student_name else "И.О. Фамилия"
     advisor_display = abbreviate_name(advisor_name, spaced_initials=True) if advisor_name else "И.О. Фамилия"
+    normocontrol_name = str(meta.get("normocontrol_name", "")).strip()
+    normocontrol_display = abbreviate_name(normocontrol_name, spaced_initials=True) if normocontrol_name else "И.О. Фамилия"
     signer_rows = [
         ("Выполнил", ""),
         (f"студент гр. {student_group}", student_display),
         ("Руководитель", ""),
         (advisor_position or "должность, ученая степень", advisor_display),
-        ("Консультант по нормоконтролю", "И.О. Фамилия"),
+        ("Консультант по нормоконтролю", normocontrol_display),
     ]
     for left, right in signer_rows:
         paragraph = document.add_paragraph(style="Report Cover")
@@ -1258,9 +1349,12 @@ def add_heading(document: Document, block: dict[str, Any]) -> None:
         # number begins at 1.25 cm in both Word and LibreOffice.
         paragraph.paragraph_format.left_indent = Cm(0)
         paragraph.paragraph_format.first_line_indent = Cm(1.25)
-        # tr23-26 3.3.3: one free line between the previous text and the
-        # next heading (only for in-flow subsection headings).
-        paragraph.paragraph_format.space_before = Pt(0 if page_break_before else BLANK_LINE_PT)
+        # tr23-26 3.3.3: one free line between the previous text or object and
+        # the next heading. Between consecutive headings (a section heading and
+        # its first subsection) the manual example keeps no free line.
+        paragraph.paragraph_format.space_before = Pt(
+            0 if page_break_before or _LAST_BLOCK_KIND["kind"] == "heading" else BLANK_LINE_PT
+        )
 
 
 def add_paragraph_block(document: Document, block: dict[str, Any]) -> None:
@@ -1762,7 +1856,10 @@ def add_table_part(
             run = paragraph.add_run(clean_text(value, field=f"table cell {row_index},{index}"))
             run_font = font_family
             run_size = font_size
-            set_run_font(run, run_font, run_size, bold=(row_index == 0))
+            # GOST 7.32-2017 6.1.1 permits bold only for section and structural
+            # headings; tr23-26 3.7.13 does not request bold in tables, so the
+            # header row stays regular.
+            set_run_font(run, run_font, run_size)
 
     if keep_together and len(table.rows) > 1:
         # Word and LibreOffice honour keep-with-next inside table cells. Applying
@@ -1845,11 +1942,16 @@ def add_table(document: Document, block: dict[str, Any]) -> None:
         parts = [rows]
 
     keep_together_raw = block.get("keep_together")
-    if bool(keep_together_raw):
+    keep_together = bool(keep_together_raw)
+    # A short table that fits one page may stay whole: at 12 pt with single
+    # spacing a ≤ 20-row table occupies roughly 10 cm or less, so moving it to
+    # the next page keeps the previous page more than 60 % full. Longer tables
+    # must use automatic pagination with repeated headers or rows_per_page.
+    if keep_together and len(rows) > 20:
         raise SpecError(
-            "keep_together is disabled for whole tables because it creates large blank areas"
+            "keep_together is allowed only for tables that fit one page "
+            "(≤ 20 rows); longer tables use rows_per_page or native pagination"
         )
-    keep_together = False
 
     use_final_label = bool(block.get("use_final_label", False))
     if use_final_label:
@@ -1868,6 +1970,8 @@ def add_table(document: Document, block: dict[str, Any]) -> None:
         else:
             label = f"Продолжение таблицы {number}"
         caption_paragraph = document.add_paragraph(label, style="Report Table Caption")
+        if part_index == 0:
+            add_bookmark(document, caption_paragraph, object_bookmark_name("Table", number))
         # tr23-26 3.7.3: one free line between the text and the table; the
         # continuation captions sit at the top of a fresh page and need no gap.
         caption_paragraph.paragraph_format.space_before = Pt(BLANK_LINE_PT if part_index == 0 else 0)
@@ -1951,26 +2055,7 @@ def add_equation(document: Document, block: dict[str, Any]) -> None:
     equation_half_points = "28"
     paragraph.style = document.styles[f"Report Equation {equation_half_points}"]
     equation = copy.deepcopy(latex_to_omath(latex))
-    for math_run in equation.xpath(".//m:r", namespaces=OMML_NAMESPACES):
-        rpr = math_run.find(qn("w:rPr"))
-        if rpr is None:
-            rpr = OxmlElement("w:rPr")
-            math_run.insert(0, rpr)
-        fonts = rpr.find(qn("w:rFonts"))
-        if fonts is None:
-            fonts = OxmlElement("w:rFonts")
-            rpr.insert(0, fonts)
-        for key in ("ascii", "hAnsi", "eastAsia", "cs"):
-            fonts.set(qn(f"w:{key}"), "Cambria Math")
-        for tag in ("w:sz", "w:szCs"):
-            size = rpr.find(qn(tag))
-            if size is None:
-                size = OxmlElement(tag)
-                rpr.append(size)
-            size.set(qn("w:val"), equation_half_points)
-        character_spacing = rpr.find(qn("w:spacing"))
-        if character_spacing is not None:
-            rpr.remove(character_spacing)
+    style_math_runs(equation, equation_half_points)
     paragraph_run_properties = paragraph._p.get_or_add_pPr().find(qn("w:rPr"))
     if paragraph_run_properties is None:
         paragraph_run_properties = OxmlElement("w:rPr")
@@ -1993,6 +2078,7 @@ def add_equation(document: Document, block: dict[str, Any]) -> None:
         run.add_tab()
         run.add_text(f"({number})")
         set_run_font(run, "Times New Roman", 14)
+        add_bookmark(document, paragraph, object_bookmark_name("Equation", number))
     request_gap_after_object()
 
 
@@ -2019,6 +2105,7 @@ def add_code(document: Document, block: dict[str, Any]) -> None:
             raise SpecError("listing caption must not end with a period")
         keep_previous_reference(document)
         paragraph = document.add_paragraph(f"Листинг {number} – {caption}", style="Report Table Caption")
+        add_bookmark(document, paragraph, object_bookmark_name("Listing", number))
         paragraph.paragraph_format.keep_with_next = True
     lines = text.expandtabs(4).splitlines() or [""]
     if presentation == "fragment":
@@ -2177,6 +2264,12 @@ def add_content(document: Document, blocks: Iterable[dict[str, Any]]) -> None:
         if handler is None:
             raise SpecError(f"Unsupported content block type at index {index}: {block_type}")
         handler(document, block)
+        if block_type == "heading":
+            _LAST_BLOCK_KIND["kind"] = "heading"
+        elif block_type in {"paragraph", "bullet_list", "numbered_list", "note"}:
+            _LAST_BLOCK_KIND["kind"] = "text"
+        else:
+            _LAST_BLOCK_KIND["kind"] = "object"
 
 
 def validate_spec(spec: dict[str, Any]) -> None:
@@ -2387,6 +2480,7 @@ def build(spec: dict[str, Any], output: Path) -> None:
     ACTIVE_FORMAT_PROFILE = FORMAT_PROFILES[ACTIVE_FORMAT_PROFILE_NAME]
     _FOOTNOTES.clear()
     _PENDING_OBJECT_GAP["active"] = False
+    _LAST_BLOCK_KIND["kind"] = None
     document = Document()
     # Continuous physical numbering from the title page; the title page number
     # stays hidden via a different first-page footer, so the first visible
@@ -2407,6 +2501,12 @@ def build(spec: dict[str, Any], output: Path) -> None:
     properties.category = f"{report_type} {cover_layout}"
 
     document._report_blocks = spec["content"]  # type: ignore[attr-defined]
+    _KNOWN_EQUATION_NUMBERS.clear()
+    for block in spec["content"]:
+        if isinstance(block, dict) and block.get("type") == "equation":
+            number = str(block.get("number", "")).strip()
+            if number:
+                _KNOWN_EQUATION_NUMBERS.add(number)
 
     add_cover(document, spec)
     content = [dict(block) for block in spec["content"]]
