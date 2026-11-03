@@ -2495,7 +2495,17 @@ def build(spec: dict[str, Any], output: Path) -> None:
     properties.title = required(spec["metadata"], "title")
     properties.subject = str(settings.get("subject", "Учебный отчёт"))
     properties.author = str(settings.get("author", ""))
-    properties.last_modified_by = ""
+    properties.last_modified_by = str(settings.get("author", "")) or ""
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    created_meta = spec.get("metadata", {}).get("created")
+    if created_meta:
+        try:
+            properties.created = dt.datetime.fromisoformat(str(created_meta))
+        except Exception:
+            properties.created = now_utc
+    else:
+        properties.created = now_utc
+    properties.modified = now_utc
     properties.keywords = f"academic-report-format-profile:{ACTIVE_FORMAT_PROFILE_NAME}"
     properties.comments = ""
     report_type = spec["report_type"]
