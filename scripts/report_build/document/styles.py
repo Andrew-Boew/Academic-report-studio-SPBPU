@@ -397,7 +397,7 @@ class StyleBuilder(ReportPart):
             ensure_style(document, "Report Table Caption"), size=14,
             align=(WD_ALIGN_PARAGRAPH.LEFT if self.profile.get("table_caption_alignment") == "left" else WD_ALIGN_PARAGRAPH.CENTER),
             first_indent_cm=0,
-            line_spacing=float(self.profile.get("caption_line_spacing")), before=0, after=0, keep_next=True,
+            line_spacing=float(self.profile.get("caption_line_spacing")), before=12, after=3, keep_next=True,
         )
         configure_style(
             ensure_style(document, "Report Figure Annotation"), size=14,

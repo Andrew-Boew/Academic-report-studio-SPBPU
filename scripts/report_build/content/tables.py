@@ -230,17 +230,12 @@ class TableBuilder(ReportPart):
         for part_index, part_rows in enumerate(parts):
             if part_index == 0:
                 label = f"Таблица {number} – {caption}"
-            elif use_final_label and part_index == len(parts) - 1:
-                label = f"Окончание таблицы {number}"
-            else:
-                label = f"Продолжение таблицы {number}"
-            caption_paragraph = document.add_paragraph(label, style="Report Table Caption")
-            if part_index == 0:
+                caption_paragraph = document.add_paragraph(label, style="Report Table Caption")
                 add_bookmark(document, caption_paragraph, object_bookmark_name("Table", number))
-            # tr23-26 3.7.3: one free line between the text and the table; the
-            # continuation captions sit at the top of a fresh page and need no gap.
-            caption_paragraph.paragraph_format.space_before = Pt(OBJECT_GAP_PT if part_index == 0 else 0)
-            caption_paragraph.paragraph_format.space_after = Pt(0)
+                caption_paragraph.paragraph_format.space_before = Pt(
+                    self.state.consume_before(TABLE_CAPTION_BEFORE_PT)
+                )
+                caption_paragraph.paragraph_format.space_after = Pt(TABLE_CAPTION_AFTER_PT)
             self.add_table_part(
                 document,
                 headers,
@@ -255,4 +250,4 @@ class TableBuilder(ReportPart):
             )
             if part_index < len(parts) - 1:
                 document.add_page_break()
-        self.state.request_gap()
+        self.state.request_gap(TABLE_FOLLOWING_PT)

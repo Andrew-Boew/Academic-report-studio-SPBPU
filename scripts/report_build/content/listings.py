@@ -60,6 +60,9 @@ class ListingBuilder(ReportPart):
             keep_previous_reference(document)
             paragraph = document.add_paragraph(f"Листинг {number} – {caption}", style="Report Table Caption")
             add_bookmark(document, paragraph, object_bookmark_name("Listing", number))
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.paragraph_format.space_before = Pt(self.state.consume_before(TABLE_CAPTION_BEFORE_PT))
+            paragraph.paragraph_format.space_after = Pt(TABLE_CAPTION_AFTER_PT)
             paragraph.paragraph_format.keep_with_next = True
         lines = text.expandtabs(4).splitlines() or [""]
         if presentation == "fragment":
