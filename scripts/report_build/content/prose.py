@@ -149,8 +149,37 @@ class ProseBuilder(ReportPart):
         if not isinstance(items, list) or not items:
             raise SpecError(f"{block.get('type')} requires a non-empty items list")
         for index, item in enumerate(items):
+            if isinstance(item, dict):
+                text = item.get("text", "")
+                level = int(item.get("level", 1))
+            else:
+                text = item
+                level = 1
+            if level not in (1, 2, 3):
+                raise SpecError("list item level must be 1, 2, or 3")
             paragraph = document.add_paragraph(style=style)
+            if numbered and level > 1:
+                ppr = paragraph._p.get_or_add_pPr()
+                num_pr = ppr.find(qn("w:numPr"))
+                if num_pr is None:
+                    num_pr = OxmlElement("w:numPr")
+                    ppr.append(num_pr)
+                ilvl = num_pr.find(qn("w:ilvl"))
+                if ilvl is None:
+                    ilvl = OxmlElement("w:ilvl")
+                    num_pr.insert(0, ilvl)
+                ilvl.set(qn("w:val"), str(level - 1))
+                style_ppr = document.styles[style]._element.find(qn("w:pPr"))
+                style_num_pr = style_ppr.find(qn("w:numPr")) if style_ppr is not None else None
+                style_num = style_num_pr.find(qn("w:numId")) if style_num_pr is not None else None
+                num_id = num_pr.find(qn("w:numId"))
+                if num_id is None and style_num is not None:
+                    num_id = OxmlElement("w:numId")
+                    num_id.set(qn("w:val"), style_num.get(qn("w:val")))
+                    num_pr.append(num_id)
+                paragraph.paragraph_format.left_indent = Cm((1066 + (level - 1) * 360) / 567)
+                paragraph.paragraph_format.first_line_indent = Cm(-357 / 567)
             if index == 0:
                 self.state.apply_gap(paragraph.paragraph_format)
-            self.ctx.markup.add_report_text(paragraph, clean_text(item, field="list item"))
+            self.ctx.markup.add_report_text(paragraph, clean_text(text, field="list item"))
             keep_paragraph_lines(paragraph)

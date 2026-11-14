@@ -148,7 +148,7 @@ def configure_dash_bullet_numbering(document: Document) -> int:
     return num_id
 
 def configure_paren_number_numbering(document: Document) -> int:
-    """Link List Number to a real Word list labelled `1)`, `2)`, ... (tr23-26 3.5.3)."""
+    """Link List Number to a dotted multilevel list: `1.`, `1.1.`, `1.1.1.`."""
     numbering = document.part.numbering_part.element
     abstract_ids = [
         int(node.get(qn("w:abstractNumId"), "0"))
@@ -164,33 +164,34 @@ def configure_paren_number_numbering(document: Document) -> int:
     abstract = OxmlElement("w:abstractNum")
     abstract.set(qn("w:abstractNumId"), str(abstract_id))
     multi = OxmlElement("w:multiLevelType")
-    multi.set(qn("w:val"), "singleLevel")
+    multi.set(qn("w:val"), "multilevel")
     abstract.append(multi)
-    lvl = OxmlElement("w:lvl")
-    lvl.set(qn("w:ilvl"), "0")
-    start = OxmlElement("w:start")
-    start.set(qn("w:val"), "1")
-    num_fmt = OxmlElement("w:numFmt")
-    num_fmt.set(qn("w:val"), "decimal")
-    lvl_text = OxmlElement("w:lvlText")
-    lvl_text.set(qn("w:val"), "%1)")
-    suffix = OxmlElement("w:suff")
-    suffix.set(qn("w:val"), "space")
-    lvl_jc = OxmlElement("w:lvlJc")
-    lvl_jc.set(qn("w:val"), "left")
-    ppr = OxmlElement("w:pPr")
-    indent = OxmlElement("w:ind")
-    indent.set(qn("w:left"), "1066")
-    indent.set(qn("w:hanging"), "357")
-    ppr.append(indent)
-    rpr = OxmlElement("w:rPr")
-    fonts = OxmlElement("w:rFonts")
-    for key in ("ascii", "hAnsi", "eastAsia", "cs"):
-        fonts.set(qn(f"w:{key}"), "Times New Roman")
-    rpr.append(fonts)
-    for child in (start, num_fmt, lvl_text, suffix, lvl_jc, ppr, rpr):
-        lvl.append(child)
-    abstract.append(lvl)
+    for level, label in enumerate(("%1.", "%1.%2.", "%1.%2.%3.")):
+        lvl = OxmlElement("w:lvl")
+        lvl.set(qn("w:ilvl"), str(level))
+        start = OxmlElement("w:start")
+        start.set(qn("w:val"), "1")
+        num_fmt = OxmlElement("w:numFmt")
+        num_fmt.set(qn("w:val"), "decimal")
+        lvl_text = OxmlElement("w:lvlText")
+        lvl_text.set(qn("w:val"), label)
+        suffix = OxmlElement("w:suff")
+        suffix.set(qn("w:val"), "space")
+        lvl_jc = OxmlElement("w:lvlJc")
+        lvl_jc.set(qn("w:val"), "left")
+        ppr = OxmlElement("w:pPr")
+        indent = OxmlElement("w:ind")
+        indent.set(qn("w:left"), str(1066 + level * 360))
+        indent.set(qn("w:hanging"), "357")
+        ppr.append(indent)
+        rpr = OxmlElement("w:rPr")
+        fonts = OxmlElement("w:rFonts")
+        for key in ("ascii", "hAnsi", "eastAsia", "cs"):
+            fonts.set(qn(f"w:{key}"), "Times New Roman")
+        rpr.append(fonts)
+        for child in (start, num_fmt, lvl_text, suffix, lvl_jc, ppr, rpr):
+            lvl.append(child)
+        abstract.append(lvl)
 
     first_num = numbering.find(qn("w:num"))
     if first_num is None:
@@ -461,7 +462,7 @@ class StyleBuilder(ReportPart):
             configure_style(
                 style, size=14, align=WD_ALIGN_PARAGRAPH.JUSTIFY,
                 first_indent_cm=first, left_indent_cm=left,
-                line_spacing=1.5,
+                line_spacing=1.5, before=3, after=3,
             )
 
         if self.profile.get("dash_bullet_lists"):
