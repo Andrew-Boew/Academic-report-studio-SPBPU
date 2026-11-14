@@ -33,7 +33,7 @@ class PageCheck:
                 ("левое поле", section.left_margin.cm, 3.0),
                 ("правое поле", section.right_margin.cm, report.expected_right_margin),
                 ("верхнее поле", section.top_margin.cm, 2.0),
-                ("нижнее поле", section.bottom_margin.cm, 2.0),
+                ("нижнее поле", section.bottom_margin.cm, 1.5),
             )
             for label, actual, expected in checks:
                 if not near(actual, expected):

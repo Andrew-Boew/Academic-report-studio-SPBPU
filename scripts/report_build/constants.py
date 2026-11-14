@@ -10,7 +10,7 @@ FORMAT_PROFILES: dict[str, dict[str, Any]] = {
         "left_margin_cm": 3.0,
         "right_margin_cm": 1.5,
         "top_margin_cm": 2.0,
-        "bottom_margin_cm": 2.0,
+        "bottom_margin_cm": 1.5,
         "heading_labels": ("%1", "%1.%2", "%1.%2.%3"),
         "uppercase_structural": True,
         "table_caption_alignment": "left",
