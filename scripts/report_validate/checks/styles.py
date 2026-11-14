@@ -146,7 +146,8 @@ class StyleCheck:
                 expected_spacing = report.expected_caption_spacing if name in {"Report Caption", "Report Table Caption"} else 1.5
                 if not isinstance(line_spacing, float) or not near(line_spacing, expected_spacing, 0.01):
                     report.errors.append(f"Стиль {name}: межстрочный интервал должен быть {expected_spacing:g}")
+                expected_after = 18.0 if name == "Report Caption" else 0.0
                 if before is None or not near(before.pt, 0.0, 0.1):
                     report.errors.append(f"Стиль {name}: интервал перед должен быть 0 pt")
-                if after is None or not near(after.pt, 0.0, 0.1):
-                    report.errors.append(f"Стиль {name}: интервал после должен быть 0 pt")
+                if after is None or not near(after.pt, expected_after, 0.1):
+                    report.errors.append(f"Стиль {name}: интервал после должен быть {expected_after:g} pt")

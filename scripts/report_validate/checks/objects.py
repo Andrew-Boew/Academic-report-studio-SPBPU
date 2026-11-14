@@ -44,8 +44,8 @@ class CaptionCheck:
                 effective_line = spacing.line_spacing or paragraph.style.paragraph_format.line_spacing
                 if effective_before is None or not near(effective_before.pt, 0.0, 0.1):
                     report.errors.append(f"Подпись рисунка должна иметь интервал перед 0 pt: {text_value!r}")
-                if effective_after is None or not near(effective_after.pt, 0.0, 0.1):
-                    report.errors.append(f"Подпись рисунка должна иметь интервал после 0 pt: {text_value!r}")
+                if effective_after is None or not near(effective_after.pt, 18.0, 0.1):
+                    report.errors.append(f"Подпись рисунка должна иметь интервал после 18 pt: {text_value!r}")
                 if not isinstance(effective_line, float) or not near(effective_line, report.expected_caption_spacing, 0.01):
                     report.errors.append(
                         f"Подпись рисунка должна иметь межстрочный интервал {report.expected_caption_spacing:g}: {text_value!r}"

@@ -391,7 +391,7 @@ class StyleBuilder(ReportPart):
         configure_style(
             ensure_style(document, "Report Caption"), size=14,
             align=WD_ALIGN_PARAGRAPH.CENTER, first_indent_cm=0,
-            line_spacing=float(self.profile.get("caption_line_spacing")), before=0, after=0, keep_next=False,
+            line_spacing=float(self.profile.get("caption_line_spacing")), before=0, after=18, keep_next=False,
         )
         configure_style(
             ensure_style(document, "Report Table Caption"), size=14,

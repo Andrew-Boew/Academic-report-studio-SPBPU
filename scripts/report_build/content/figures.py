@@ -47,9 +47,8 @@ class FigureBuilder(ReportPart):
         paragraph = document.add_paragraph()
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         paragraph.paragraph_format.first_line_indent = Cm(0)
-        # Moderate separation between the text and the figure.
-        paragraph.paragraph_format.space_before = Pt(OBJECT_GAP_PT)
-        paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.paragraph_format.space_before = Pt(self.state.consume_before(FIGURE_BEFORE_PT))
+        paragraph.paragraph_format.space_after = Pt(FIGURE_AFTER_PT)
         paragraph.paragraph_format.keep_with_next = True
         run = paragraph.add_run()
         shape = run.add_picture(str(path), width=Cm(width))
@@ -79,8 +78,9 @@ class FigureBuilder(ReportPart):
             raise SpecError("figure caption must not end with a period")
         label = f"Рисунок {number} – {caption}"
         caption_paragraph = document.add_paragraph(label, style="Report Caption")
+        caption_paragraph.paragraph_format.space_before = Pt(0)
+        caption_paragraph.paragraph_format.space_after = Pt(FIGURE_CAPTION_AFTER_PT)
         add_bookmark(document, caption_paragraph, figure_bookmark_name(number))
-        self.state.request_gap()
 
     def add_figure_placeholder(self, document: Document, block: dict[str, Any]) -> None:
         number = clean_text(block.get("number", ""), field="figure placeholder number")
@@ -118,5 +118,6 @@ class FigureBuilder(ReportPart):
         # "insert a screenshot" must never leak into the submitted report.
         label = f"Рисунок {number} – {caption}"
         caption_paragraph = document.add_paragraph(label, style="Report Caption")
+        caption_paragraph.paragraph_format.space_before = Pt(0)
+        caption_paragraph.paragraph_format.space_after = Pt(FIGURE_CAPTION_AFTER_PT)
         add_bookmark(document, caption_paragraph, figure_bookmark_name(number))
-        self.state.request_gap()
