@@ -1335,7 +1335,7 @@ def add_heading(document: Document, block: dict[str, Any]) -> None:
         structural = bool(block["structural"])
     else:
         structural = level == 1 and bool(re.match(
-            r"^(?:СОДЕРЖАНИЕ|ВВЕДЕНИЕ|ЗАКЛЮЧЕНИЕ|ВЫВОДЫ|СПИСОК|ПРИЛОЖЕНИЕ|РЕФЕРАТ|ABSTRACT|ЗАДАНИЕ)", text, re.I
+            r"^(?:СОДЕРЖАНИЕ|ВВЕДЕНИЕ|ЗАКЛЮЧЕНИЕ|ВЫВОДЫ|СПИСОК|ПРИЛОЖЕНИЕ|РЕФЕРАТ|ABSTRACT)$", text, re.I
         ))
     style = "Report Structural Heading" if structural else f"Heading {level}"
     if structural and profile_value("uppercase_structural"):
