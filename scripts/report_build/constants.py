@@ -40,17 +40,19 @@ LEGACY_FORMAT_PROFILES = {"spbpu": "unified", "student_default": "unified"}
 ACTIVE_FORMAT_PROFILE_NAME = "unified"
 ACTIVE_FORMAT_PROFILE = FORMAT_PROFILES["unified"]
 MAX_CONTENT_WIDTH_CM = 16.5
-# tr23-26 3.3.3/3.6.6/3.7.3 and GOST 7.32-2017 6.8.1 mention one free line
-# before headings and around figures, tables and formulas. The user confirmed
-# the compact rhythm of the previous profile instead: 0 pt everywhere, set by
-# paragraph properties (never by empty paragraphs). The constant stays as a
-# single switch; the deviation from the manuals is recorded in
-# references/spbpu-profile.md ("Решения конфликтов источников").
+# Empty paragraphs are never used as vertical spacers.
 BLANK_LINE_PT = 0.0
-# Objects (figures, tables, listings, equations) need visual separation from
-# body text: a moderate 8 pt gap above and below, set by paragraph properties.
-# Headings stay at 0 pt — the user-confirmed tight heading look.
+# Equations keep a moderate 8 pt gap. Figures and tables follow the NIR
+# template: 12 pt above a figure, 6 pt under the image, 18 pt after the
+# figure caption; 12 pt before a table caption, 3 pt after it, and 18 pt
+# before the paragraph that follows the table. List items use 3 pt.
 OBJECT_GAP_PT = 8.0
+FIGURE_BEFORE_PT = 12.0
+FIGURE_AFTER_PT = 6.0
+FIGURE_CAPTION_AFTER_PT = 18.0
+TABLE_CAPTION_BEFORE_PT = 12.0
+TABLE_CAPTION_AFTER_PT = 3.0
+TABLE_FOLLOWING_PT = 18.0
 OMML_NAMESPACES = {"m": "http://schemas.openxmlformats.org/officeDocument/2006/math"}
 PLACEHOLDER_PATTERN = re.compile(r"\{\{|\}\}|\b(?:TODO|TBD|FIXME)\b|\[вставить[^\]]*\]", re.I)
 MANUAL_HEADING_NUMBER = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+")
