@@ -1309,6 +1309,10 @@ def keep_previous_reference(document: Document, *, max_characters: int = 180) ->
     for paragraph in reversed(document.paragraphs):
         if not paragraph.text.strip():
             continue
+        if paragraph.style and paragraph.style.name in {"Report Caption", "Report Table Caption", "Report Figure Annotation"}:
+            return
+        if paragraph.text.strip().startswith(("Рисунок ", "Таблица ", "Листинг ")):
+            return
         # Keeping a long paragraph with a following figure/table can move the
         # whole paragraph to the next page and leave half of the prior page
         # empty. Only a genuinely short lead-in is kept with the object.
