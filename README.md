@@ -58,16 +58,18 @@ macOS и Linux:
 
 ```bash
 export AGENT_SKILLS_DIR="/абсолютный/путь/к/каталогу/skills"
-mkdir -p "$AGENT_SKILLS_DIR"
-cp -R . "$AGENT_SKILLS_DIR/"
+mkdir -p "$AGENT_SKILLS_DIR/academic-report-studio"
+cp -R SKILL.md agents assets references scripts requirements.txt requirements-render.txt README.md LICENSE \
+  "$AGENT_SKILLS_DIR/academic-report-studio/"
 ```
 
 Windows PowerShell:
 
 ```powershell
 $AgentSkillsDir = "C:\путь\к\каталогу\skills"
-New-Item -ItemType Directory -Force -Path $AgentSkillsDir
-Copy-Item -Recurse -Force "." $AgentSkillsDir
+New-Item -ItemType Directory -Force -Path "$AgentSkillsDir\academic-report-studio"
+Copy-Item -Recurse -Force SKILL.md, agents, assets, references, scripts, requirements.txt, requirements-render.txt, README.md, LICENSE `
+  "$AgentSkillsDir\academic-report-studio"
 ```
 
 После установки основной файл должен находиться здесь:
@@ -102,7 +104,7 @@ LibreOffice устанавливается отдельно средствами
 
 ## Если агент не поддерживает навыки напрямую
 
-1. Сохраните каталог `.` целиком в доступном агенту рабочем пространстве.
+1. Сохраните корень репозитория целиком в доступном агенту рабочем пространстве.
 2. Добавьте в проектные инструкции требование полностью читать `SKILL.md` перед началом работы.
 3. Разрешите чтение `references/` и `assets/` относительно каталога навыка.
 4. Разрешите запуск сценариев из `scripts/` в изолированном Python-окружении.
@@ -148,16 +150,44 @@ SKILL.md и следуй его требованиям.
 ## Структура
 
 ```text
-
-├── SKILL.md                 # основной рабочий процесс
-├── agents/agent.yaml        # метаданные интерфейса
-├── assets/                  # шапка СПбПУ и пустые персональные поля
-├── references/              # правила выполнения, оформления и текста
-│   └── humanize-prose.md    # правка текста после черновика
-├── scripts/                 # сборка, проверка, отрисовка и очистка
-│   └── check_facts.py       # сверка чисел и оговорок до и после правки
+.
+├── SKILL.md                      # основной рабочий процесс
+├── README.md
+├── LICENSE
 ├── requirements.txt
-└── requirements-render.txt
+├── requirements-render.txt
+├── agents/
+│   └── agent.yaml                # метаданные интерфейса
+├── assets/                       # шапка СПбПУ и пустые персональные поля
+│   ├── report-profile.default.json
+│   └── report-subjects.default.json
+├── references/                   # выполнение, оформление и текст
+│   ├── execute-lab.md
+│   ├── flowcharts.md
+│   ├── format-standard.md
+│   ├── formulas-and-pagination.md
+│   ├── humanize-prose.md
+│   ├── lab-automation.md
+│   ├── layout-profile.md
+│   ├── natural-academic-writing.md
+│   ├── spacing-and-layout-from-examples.md
+│   ├── spbpu-profile.md
+│   ├── spec-format.md
+│   └── structures-and-writing.md
+└── scripts/
+    ├── build_report.py           # сборка DOCX
+    ├── validate_report.py        # структурная проверка
+    ├── finalize_toc.py           # содержание
+    ├── inspect_project.py        # разбор файлов проекта
+    ├── render_docx.py            # PDF и страницы
+    ├── cleanup_report_work.py    # очистка черновиков
+    ├── check_facts.py            # сверка чисел и оговорок
+    ├── report_build/             # сборщик
+    ├── report_validate/          # проверки
+    ├── report_toc/               # содержание
+    ├── report_inventory/         # типы файлов проекта
+    ├── report_render/            # отрисовка
+    └── report_cleanup/           # план очистки
 ```
 
 ## Проверка установки
