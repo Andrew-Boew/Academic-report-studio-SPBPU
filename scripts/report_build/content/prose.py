@@ -38,8 +38,8 @@ class ProseBuilder(ReportPart):
     def add_heading(self, document: Document, block: dict[str, Any]) -> None:
         self.state.clear_gap()
         level = int(block.get("level", 1))
-        if level not in (1, 2, 3):
-            raise SpecError(f"Heading level must be 1, 2, or 3: {level}")
+        if level not in range(1, 7):
+            raise SpecError(f"Heading level must be 1..6: {level}")
         text = self.ctx.markup.normalize_report_text(clean_text(block.get("text"), field="heading"))
         if MANUAL_HEADING_NUMBER.match(text):
             raise SpecError(
@@ -73,10 +73,13 @@ class ProseBuilder(ReportPart):
             # number begins at 1.25 cm in both Word and LibreOffice.
             paragraph.paragraph_format.left_indent = Cm(0)
             paragraph.paragraph_format.first_line_indent = Cm(1.25)
-            # Headings keep the confirmed tight look: 0 pt before, both after
-            # text and after another heading (the tr23-26 3.3.3 "free line" is a
-            # documented deviation, see references/spbpu-profile.md).
-            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.line_spacing = 1.0
+            if level == 1:
+                paragraph.paragraph_format.space_before = Pt(0)
+                paragraph.paragraph_format.space_after = Pt(18)
+            else:
+                paragraph.paragraph_format.space_before = Pt(12)
+                paragraph.paragraph_format.space_after = Pt(6)
 
     def add_paragraph_block(self, document: Document, block: dict[str, Any]) -> None:
         paragraph = document.add_paragraph()

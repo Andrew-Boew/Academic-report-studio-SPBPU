@@ -250,7 +250,7 @@ class StyleBuilder(ReportPart):
     """Поля, стили и нумерация документа."""
 
     def configure_heading_numbering(self, document: Document) -> int:
-        """Create a real Word multilevel list linked to Heading 1/2/3."""
+        """Create a real Word multilevel list linked to Heading 1–6."""
         numbering = document.part.numbering_part.element
         abstract_ids = [
             int(node.get(qn("w:abstractNumId"), "0"))
@@ -286,7 +286,7 @@ class StyleBuilder(ReportPart):
             ppr = OxmlElement("w:pPr")
             indent = OxmlElement("w:ind")
             # Number position = left - hanging = 709 twips (1.25 cm).
-            # Heading text begins at 1417 twips (2.50 cm); Heading 1–3 themselves
+            # Heading text begins at 1417 twips (2.50 cm). Heading styles themselves
             # keep zero direct indents so the positions are never added twice.
             indent.set(qn("w:left"), "1417")
             indent.set(qn("w:hanging"), "708")
@@ -307,7 +307,8 @@ class StyleBuilder(ReportPart):
         num.append(reference)
         numbering.append(num)
 
-        for level in range(3):
+        labels = self.profile.get("heading_labels")
+        for level in range(len(labels)):
             set_style_numbering(document.styles[f"Heading {level + 1}"], level=level, num_id=num_id)
         return num_id
 
@@ -347,19 +348,25 @@ class StyleBuilder(ReportPart):
         )
 
         configure_style(
-            document.styles["Heading 1"], size=14, bold=True,
+            document.styles["Heading 1"], size=18, bold=True,
             align=WD_ALIGN_PARAGRAPH.LEFT, first_indent_cm=0, left_indent_cm=0,
-            line_spacing=1.5, before=0, after=0, keep_next=True,
+            line_spacing=1.0, before=0, after=18, keep_next=True,
         )
         configure_style(
-            document.styles["Heading 2"], size=14, bold=True,
+            document.styles["Heading 2"], size=16, bold=True,
             align=WD_ALIGN_PARAGRAPH.LEFT, first_indent_cm=0, left_indent_cm=0,
-            line_spacing=1.5, before=0, after=0, keep_next=True,
+            line_spacing=1.0, before=12, after=6, keep_next=True,
         )
+        for level in range(3, 6):
+            configure_style(
+                document.styles[f"Heading {level}"], size=14, bold=True, italic=False,
+                align=WD_ALIGN_PARAGRAPH.LEFT, first_indent_cm=0, left_indent_cm=0,
+                line_spacing=1.0, before=12, after=6, keep_next=True,
+            )
         configure_style(
-            document.styles["Heading 3"], size=14, bold=True, italic=True,
+            document.styles["Heading 6"], size=14, bold=False, italic=True,
             align=WD_ALIGN_PARAGRAPH.LEFT, first_indent_cm=0, left_indent_cm=0,
-            line_spacing=1.5, before=0, after=0, keep_next=True,
+            line_spacing=1.0, before=12, after=6, keep_next=True,
         )
         structural_heading = ensure_style(document, "Report Structural Heading")
         configure_style(
@@ -370,7 +377,10 @@ class StyleBuilder(ReportPart):
         set_outline_level(structural_heading, 0)
         self.configure_heading_numbering(document)
 
-        for style_name in ("Heading 1", "Heading 2", "Heading 3", "Report Structural Heading"):
+        for style_name in (
+            "Heading 1", "Heading 2", "Heading 3", "Heading 4", "Heading 5", "Heading 6",
+            "Report Structural Heading",
+        ):
             ppr = document.styles[style_name]._element.get_or_add_pPr()
             suppress = ppr.find(qn("w:suppressAutoHyphens"))
             if suppress is None:

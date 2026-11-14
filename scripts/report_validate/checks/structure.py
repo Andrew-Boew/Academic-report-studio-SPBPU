@@ -16,7 +16,10 @@ class HeadingCheck:
     """Текст заголовков и разрыв страницы у раздела."""
 
     def apply(self, report) -> None:
-        heading_style_names = {"Heading 1", "Heading 2", "Heading 3", "Report Structural Heading"}
+        heading_style_names = {
+            "Heading 1", "Heading 2", "Heading 3", "Heading 4", "Heading 5", "Heading 6",
+            "Report Structural Heading",
+        }
         report.heading_texts = [
             p.text.strip() for p in report.document.paragraphs
             if p.style and p.style.name in heading_style_names

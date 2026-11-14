@@ -13,7 +13,7 @@ from docx.oxml.ns import qn
 from report_validate.support import *
 
 class StyleCheck:
-    """Normal, Heading 1–3, структурные стили и номера."""
+    """Normal, Heading 1–6, структурные стили и номера."""
 
     def apply(self, report) -> None:
         normal = report.document.styles["Normal"]
@@ -30,8 +30,19 @@ class StyleCheck:
         if not isinstance(spacing, float) or not near(spacing, 1.5, 0.01):
             report.errors.append("Стиль Normal: межстрочный интервал должен быть 1,5")
 
-        expected_heading_sizes = {"Heading 1": 14.0, "Heading 2": 14.0, "Heading 3": 14.0}
-        for name in ("Heading 1", "Heading 2", "Heading 3"):
+        expected_heading_sizes = {
+            "Heading 1": 18.0, "Heading 2": 16.0, "Heading 3": 14.0,
+            "Heading 4": 14.0, "Heading 5": 14.0, "Heading 6": 14.0,
+        }
+        expected_heading_spacing = {
+            "Heading 1": (0.0, 18.0),
+            "Heading 2": (12.0, 6.0),
+            "Heading 3": (12.0, 6.0),
+            "Heading 4": (12.0, 6.0),
+            "Heading 5": (12.0, 6.0),
+            "Heading 6": (12.0, 6.0),
+        }
+        for name in expected_heading_sizes:
             style = report.document.styles[name]
             expected_size = expected_heading_sizes[name]
             if style.font.name != "Times New Roman" or style.font.size is None or not near(style.font.size.pt, expected_size, 0.1):
@@ -46,15 +57,21 @@ class StyleCheck:
                 report.errors.append(
                     f"Стиль {name}: прямые отступы должны быть 0 см; общий отступ 1,25 см задаёт нумерация Word"
                 )
-            if style.paragraph_format.space_before is None or not near(style.paragraph_format.space_before.pt, 0.0, 0.1):
-                report.errors.append(f"Стиль {name}: интервал перед должен быть 0 pt")
-            if style.paragraph_format.space_after is None or not near(style.paragraph_format.space_after.pt, 0.0, 0.1):
-                report.errors.append(f"Стиль {name}: интервал после должен быть 0 pt")
-        if not report.document.styles["Heading 3"].font.italic:
-            report.errors.append("Стиль Heading 3 должен быть полужирным курсивом")
+            before_pt, after_pt = expected_heading_spacing[name]
+            if style.paragraph_format.space_before is None or not near(style.paragraph_format.space_before.pt, before_pt, 0.1):
+                report.errors.append(f"Стиль {name}: интервал перед должен быть {before_pt:g} pt")
+            if style.paragraph_format.space_after is None or not near(style.paragraph_format.space_after.pt, after_pt, 0.1):
+                report.errors.append(f"Стиль {name}: интервал после должен быть {after_pt:g} pt")
+            line_spacing = style.paragraph_format.line_spacing
+            if not isinstance(line_spacing, float) or not near(line_spacing, 1.0, 0.01):
+                report.errors.append(f"Стиль {name}: межстрочный интервал должен быть одинарным")
+        if report.document.styles["Heading 3"].font.italic:
+            report.errors.append("Стиль Heading 3 не должен быть курсивом")
+        if not report.document.styles["Heading 6"].font.italic:
+            report.errors.append("Стиль Heading 6 должен быть курсивом")
 
         heading_num_ids: list[str] = []
-        for level, name in enumerate(("Heading 1", "Heading 2", "Heading 3")):
+        for level, name in enumerate(("Heading 1", "Heading 2", "Heading 3", "Heading 4", "Heading 5", "Heading 6")):
             ppr = report.document.styles[name]._element.get_or_add_pPr()
             num_pr = ppr.find(qn("w:numPr"))
             ilvl = num_pr.find(qn("w:ilvl")) if num_pr is not None else None
@@ -64,7 +81,7 @@ class StyleCheck:
                 continue
             heading_num_ids.append(num_id.get(qn("w:val"), ""))
         if heading_num_ids and len(set(heading_num_ids)) != 1:
-            report.errors.append("Heading 1–3 должны использовать одну многоуровневую нумерацию Word")
+            report.errors.append("Heading 1–6 должны использовать одну многоуровневую нумерацию Word")
         if heading_num_ids and len(set(heading_num_ids)) == 1:
             numbering = report.document.part.numbering_part.element
             num_node = next(
@@ -80,7 +97,7 @@ class StyleCheck:
                 ),
                 None,
             )
-            for level in range(3):
+            for level in range(6):
                 lvl = next(
                     (
                         node for node in abstract.findall(qn("w:lvl"))
@@ -90,7 +107,9 @@ class StyleCheck:
                 ) if abstract is not None else None
                 indent = lvl.find(qn("w:pPr") + "/" + qn("w:ind")) if lvl is not None else None
                 label_node = lvl.find(qn("w:lvlText")) if lvl is not None else None
-                expected_labels = ("%1", "%1.%2", "%1.%2.%3") if report.strict_spbpu else ("%1.", "%1.%2.", "%1.%2.%3.")
+                expected_labels = (
+                    "%1", "%1.%2", "%1.%2.%3", "%1.%2.%3.%4", "%1.%2.%3.%4.%5", "%1.%2.%3.%4.%5.%6",
+                )
                 if label_node is None or label_node.get(qn("w:val")) != expected_labels[level]:
                     report.errors.append(
                         f"Уровень {level + 1}: неверный формат номера для профиля {report.format_profile}"
